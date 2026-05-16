@@ -1766,6 +1766,18 @@ REGRAS:
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _sanitize_label(label: str) -> str:
+    if not label:
+        return "subClassOf"
+    # remove palavras funcionais comuns
+    stopwords = {"para", "de", "do", "da", "no", "na", "o", "a", "os", "as", "um", "uma", "e", "com"}
+    words = [w for w in re.split(r'\s+', label.strip()) if w.lower() not in stopwords]
+    if not words:
+        return "subClassOf"
+    # camelCase: primeira palavra minúscula, demais capitalizadas
+    return words[0].lower() + ''.join(w.capitalize() for w in words[1:])
+
+
 # ── /api/generate ─────────────────────────────────────────────────────────
 
 @views.route('/api/generate', methods=['POST'])
@@ -1781,6 +1793,12 @@ def api_generate():
 
     existing_nodes = body.get("existing_nodes", [])
     existing_names_list = [n["name"] for n in existing_nodes]
+
+    def _normalize_key(name: str) -> str:
+        import unicodedata
+        nfkd = unicodedata.normalize('NFKD', name)
+        ascii_str = nfkd.encode('ASCII', 'ignore').decode('ASCII')
+        return ascii_str.lower().strip()
 
     EXTRACT_SCHEMA = {
         "type": "object",
@@ -1803,37 +1821,69 @@ def api_generate():
     }
 
     messages = [
-        {"role": "system", "content": "Extraia informações de comandos sobre grafos. Responda APENAS com JSON válido, sem markdown."},
+        {
+            "role": "system",
+            "content": (
+                "Você é um sistema de extração de conhecimento para ontologias OWL. "
+                "Sua tarefa é ler um texto em linguagem natural e identificar:\n"
+                "1. Entidades (classes OWL) mencionadas ou implícitas no texto.\n"
+                "2. Relações semânticas entre essas entidades.\n"
+                "Extraia apenas entidades e relações que fazem sentido como classes de domínio. "
+                "Ignore artigos, verbos auxiliares e conectivos. "
+                "Responda APENAS com JSON válido, sem markdown."
+            )
+        },
         {
             "role": "user",
-            "content": f"""Analise este comando e extraia as informações:
+            "content": f"""Leia o texto abaixo e extraia entidades e relações para um grafo ontológico.
 
-"{prompt}"
+    TEXTO:
+    "{prompt}"
 
-Nós que já existem no grafo (não inclua estes em nodes_to_create):
-{json.dumps(existing_names_list, ensure_ascii=False)}
+    Nós que já existem no grafo (APENAS estes podem aparecer em connections sem estar em nodes_to_create):
+    {json.dumps(existing_names_list, ensure_ascii=False)}
+    Se a lista estiver vazia, TODOS os nós referenciados em connections DEVEM estar em nodes_to_create.
 
-Responda com JSON:
-{{
-  "nodes_to_create": ["lista de classes NOVAS a criar"],
-  "connections": [
-    {{"source": "classe origem", "target": "classe destino", "label": "nome da relação SE especificado, senão null"}}
-  ]
-}}
+    Responda com JSON exatamente neste formato:
+    {{
+      "nodes_to_create": ["EntidadeNova1", "EntidadeNova2"],
+      "connections": [
+        {{"source": "EntidadeOrigem", "target": "EntidadeDestino", "label": "nomeRelacao ou null"}}
+      ]
+    }}
 
-REGRAS:
-- nodes_to_create: apenas classes que NÃO estão na lista de existentes
-- label: extraia o nome EXATO se o usuário especificar ("com label X", "usando X", "via X")
-- label: null se não especificado
+    REGRAS DE EXTRAÇÃO:
+    - Identifique substantivos que representam conceitos do domínio, incluindo os que aparecem em orações subordinadas como "para tratar X", "causando Y", "devido a Z"
+    - Para cada relação no texto (verbos como "detectou", "possui", "causa", "trata"), crie uma conexão com label = verbo em camelCase
+    - Se a relação não estiver explícita no texto, use null (vira subClassOf)
+    - Normalize nomes para PascalCase sem acentos e SEM espaços, tudo junto: "TranstornoBipolarTipo1" e não "Transtorno Bipolar" separado de "Tipo1"
+    - Não crie entidades para palavras funcionais (artigos, preposições, pronomes)
+    - REGRA CRÍTICA: toda entidade que aparecer em connections.source ou connections.target DEVE estar em nodes_to_create, exceto as que já existem na lista acima
+    - NUNCA assuma que um nó existe se ele não estiver na lista acima
 
-EXEMPLOS:
-Comando: "gere Cocaina e conecte a SubstanciaPsicoativa usando o label eUma" (SubstanciaPsicoativa já existe)
-{{"nodes_to_create": ["Cocaina"], "connections": [{{"source": "Cocaina", "target": "SubstanciaPsicoativa", "label": "eUma"}}]}}
+    EXEMPLOS:
+    Texto: "O psiquiatra diagnosticou transtorno bipolar tipo 1 no paciente"
+    (lista de existentes vazia)
+    {{"nodes_to_create": ["Psiquiatra", "Paciente", "TranstornoBipolarTipo1"], "connections": [
+      {{"source": "Psiquiatra", "target": "TranstornoBipolarTipo1", "label": "diagnosticou"}},
+      {{"source": "Paciente", "target": "TranstornoBipolarTipo1", "label": "possui"}}
+    ]}}
 
-Comando: "Cachorro é tipo de Animal"
-{{"nodes_to_create": ["Cachorro", "Animal"], "connections": [{{"source": "Cachorro", "target": "Animal", "label": null}}]}}
+    Texto: "O médico prescreveu antibiótico para o paciente com infecção" (Paciente já existe)
+    {{"nodes_to_create": ["Medico", "Antibiotico", "Infeccao"], "connections": [
+      {{"source": "Medico", "target": "Antibiotico", "label": "prescreveu"}},
+      {{"source": "Paciente", "target": "Infeccao", "label": "possui"}},
+      {{"source": "Antibiotico", "target": "Infeccao", "label": "trata"}}
+    ]}}
 
-Agora extraia do comando dado. Responda APENAS com JSON."""
+    Texto: "O médico receitou fluoxetina para tratar a depressão do paciente" (Medico e Paciente já existem)
+    {{"nodes_to_create": ["Fluoxetina", "Depressao"], "connections": [
+      {{"source": "Medico", "target": "Fluoxetina", "label": "receitou"}},
+      {{"source": "Fluoxetina", "target": "Depressao", "label": "trata"}},
+      {{"source": "Paciente", "target": "Depressao", "label": "possui"}}
+    ]}}
+
+    Agora extraia do TEXTO fornecido. Responda APENAS com JSON."""
         }
     ]
 
@@ -1851,35 +1901,51 @@ Agora extraia do comando dado. Responda APENAS com JSON."""
         extracted = json.loads(resp.json()["message"]["content"].strip())
         print(f"[generate] extração: {json.dumps(extracted, ensure_ascii=False)}")
 
-        existing_name_set = {n["name"].lower() for n in existing_nodes}
-        name_to_id = {n["name"].lower(): n["name"] for n in existing_nodes}
+        existing_name_set = {_normalize_key(n["name"]) for n in existing_nodes}
+        name_to_id = {_normalize_key(n["name"]): n["name"] for n in existing_nodes}
         nodes = []
         warnings = []
 
         for node_name in extracted.get("nodes_to_create", []):
             node_name = _to_pascal(node_name)
-            key = node_name.lower()
+            key = _normalize_key(node_name)
             if key in existing_name_set:
-                original = next((ex["name"] for ex in existing_nodes if ex["name"].lower() == key), node_name)
+                original = next((ex["name"] for ex in existing_nodes if _normalize_key(ex["name"]) == key), node_name)
                 name_to_id[key] = original
                 continue
             nid = str(uuid.uuid4())
             name_to_id[key] = nid
             nodes.append({"id": nid, "name": node_name, "type": "Class"})
 
+        print(f"[generate] name_to_id: {name_to_id}")
+
         edges = []
         for conn in extracted.get("connections", []):
             source = _to_pascal(conn.get("source", ""))
             target = _to_pascal(conn.get("target", ""))
-            label  = conn.get("label") or "subClassOf"
-            src_id = name_to_id.get(source.lower())
-            tgt_id = name_to_id.get(target.lower())
-            if not src_id:
-                warnings.append(f"aresta ignorada: nó origem '{source}' não existe")
+            label = _sanitize_label(conn.get("label"))
+
+            # fallback: cria o nó se não existir em vez de ignorar a aresta
+            src_id = name_to_id.get(_normalize_key(source))
+            if not src_id and source:
+                nid = str(uuid.uuid4())
+                name_to_id[_normalize_key(source)] = nid
+                nodes.append({"id": nid, "name": source, "type": "Class"})
+                src_id = nid
+                warnings.append(f"nó origem '{source}' criado automaticamente via fallback")
+
+            tgt_id = name_to_id.get(_normalize_key(target))
+            if not tgt_id and target:
+                nid = str(uuid.uuid4())
+                name_to_id[_normalize_key(target)] = nid
+                nodes.append({"id": nid, "name": target, "type": "Class"})
+                tgt_id = nid
+                warnings.append(f"nó destino '{target}' criado automaticamente via fallback")
+
+            if not src_id or not tgt_id:
+                warnings.append(f"aresta ignorada: '{source}' → '{target}' inválida")
                 continue
-            if not tgt_id:
-                warnings.append(f"aresta ignorada: nó destino '{target}' não existe")
-                continue
+
             edges.append({"source": src_id, "target": tgt_id, "label": label})
 
         return jsonify({"ok": True, "data": {"nodes": nodes, "edges": edges}, "warnings": warnings})
