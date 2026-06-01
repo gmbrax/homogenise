@@ -19,6 +19,7 @@ from website.settings import db
 from werkzeug.security import generate_password_hash
 import numpy as np
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -41,30 +42,28 @@ views = Blueprint('views', __name__)
 def home():
     return render_template("home.html", user=current_user)
 
+
 @views.route('/synopsis', methods=['GET', 'POST'])
 @login_required
 def generateText():
     if request.method == 'GET':
         cur = db.get_cursor()
         cur.execute("""
-            SELECT 
-                project.project_id, 
-                project.project_name, 
-                STRING_AGG(files.old_name, ', ') AS all_old_names 
-            FROM 
-                app.project AS project
-            JOIN 
-                app.project_file AS files 
-            ON 
-                files.project_id = project.project_id
-            GROUP BY 
-                project.project_id, project.project_name
-        """) 
+                    SELECT project.project_id,
+                           project.project_name,
+                           STRING_AGG(files.old_name, ', ') AS all_old_names
+                    FROM app.project AS project
+                             JOIN
+                         app.project_file AS files
+                         ON
+                             files.project_id = project.project_id
+                    GROUP BY project.project_id, project.project_name
+                    """)
         data = cur.fetchall()
         cur.close()
-        
+
         return render_template("synopsis.html", output_data=data, user=current_user)
-    else:        
+    else:
         project_id = request.form.get('project_id')
 
         repo = SynopsisRepository()
@@ -72,7 +71,7 @@ def generateText():
         classes_by_superclass_results = repo.get_classes_related_by_superclasses(project_id)
         classes_by_domain_and_range_results = repo.get_classes_related_by_object_property_domains_and_ranges(project_id)
 
-        triples = classes_by_superclass_results +  classes_by_domain_and_range_results + individuals_by_object_property_results
+        triples = classes_by_superclass_results + classes_by_domain_and_range_results + individuals_by_object_property_results
 
         converter = TripleConversion()
         paragraph = converter.triple_to_paragraph(triples).replace("subClassOf", "is")
@@ -93,7 +92,7 @@ def do_graph(project_id, selected_chart, selected_classes):
                     }} .                                          
                     FILTER((REPLACE(STR(?class), "^.*/([^/]*)$", "$1")) IN ({formatted_values}))
                 }} ORDER BY ?localS
-            """  
+            """
     with db.get_allegro(project_id) as conn:
         with conn.executeTupleQuery(graph_sparql) as results:
             for result in results:
@@ -107,8 +106,9 @@ def do_graph(project_id, selected_chart, selected_classes):
     custom_stopwords = ["untitled", "ontology"]
     stopwords.update(custom_stopwords)
     if selected_chart == 'Word cloud':
-        words = ' '.join(word_list) 
-        cloud = WordCloud(stopwords=stopwords,width=1280, height=720, background_color='white', collocations=False).generate(words)
+        words = ' '.join(word_list)
+        cloud = WordCloud(stopwords=stopwords, width=1280, height=720, background_color='white',
+                          collocations=False).generate(words)
         buffer = io.BytesIO()
         cloud.to_image().save(buffer, 'png')
         b64 = base64.b64encode(buffer.getvalue()).decode('ascii')
@@ -129,9 +129,9 @@ def do_graph(project_id, selected_chart, selected_classes):
 
     return b64
 
+
 @views.route('/generatestatistics', methods=['GET', 'POST'])
 def generatestatistics():
-
     is_knowledge_graph_selected = False
     graph_data = None
     project_id = request.args.get('project_id', '0') if request.method == 'GET' else request.form.get("project_id")
@@ -156,7 +156,7 @@ def generatestatistics():
                 """) as results:
             for result in results:
                 uri = str(result.getValue('s')).replace('"', '')
-                #class_name = uri.split('#')[1].split('>')[0]
+                # class_name = uri.split('#')[1].split('>')[0]
                 class_list.append(uri)
 
     class_list = sorted(class_list)
@@ -176,7 +176,7 @@ def generatestatistics():
                 nodes_dict = {}
                 edges = []
                 is_knowledge_graph_selected = True
-                formatted_values = ", ".join(f"'{word}'" for word in selected_classes)                
+                formatted_values = ", ".join(f"'{word}'" for word in selected_classes)
                 sparql = f"""                                        
                     SELECT distinct
                         (STR(?s) as ?s_uri)
@@ -211,11 +211,10 @@ def generatestatistics():
                             nodes_dict[o_uri] = {"id": o_uri, "name": o_name, "type": o_type}
                             edges.append({"source": s_uri, "target": o_uri, "label": label})
 
-                graph_data = {"data":{
+                graph_data = {"data": {
                     "nodes": list(nodes_dict.values()),
                     "edges": edges
                 }}
-
 
             plt.clf()
         except Exception as e:
@@ -238,7 +237,7 @@ def generatestatistics():
                                , project_id=int(project_id)
                                , project_list=data_project
                                , class_list=class_list
-                               , chart_list=chart_list                               
+                               , chart_list=chart_list
                                , img_uri='0')
 
 
@@ -257,14 +256,15 @@ def analysis():
         cur = db.get_cursor()
         query = 'INSERT INTO app.analysis(project_id, selected_classes, chart_type, analysis, user_id_log, user_name_log) ' \
                 'VALUES (%s, %s, %s, %s, %s, %s)'
-        cur.execute(query, (project_id, selected_classes, chart_type, text, current_user.get_id(), current_user.first_name))
+        cur.execute(query,
+                    (project_id, selected_classes, chart_type, text, current_user.get_id(), current_user.first_name))
         cur.close()
 
         return jsonify({'message': 'Analysis submitted!'})
     else:
         project_id = request.args.get('project_id', '')
         cur = db.get_cursor()
-        query = 'SELECT p.project_name, a.chart_type, a.selected_classes, a.analysis FROM app.analysis a '\
+        query = 'SELECT p.project_name, a.chart_type, a.selected_classes, a.analysis FROM app.analysis a ' \
                 'JOIN app.project p ON p.project_id = a.project_id WHERE a.project_id = %s'
         cur.execute(query, project_id)
         data = cur.fetchall()
@@ -283,25 +283,25 @@ def insights():
         if len(project_search) < 1:
             return redirect(url_for('views.insights'))
         else:
-            cur.execute("select project.project_id, project.project_name, count(files) from app.project project join app.project_file files on files.project_id = project.project_id where project.project_name like '%" + request.form.get("project_search") + "%' group by project.project_id")
+            cur.execute(
+                "select project.project_id, project.project_name, count(files) from app.project project join app.project_file files on files.project_id = project.project_id where project.project_name like '%" + request.form.get(
+                    "project_search") + "%' group by project.project_id")
             data = cur.fetchall()
             cur.close()
-            return render_template("insights.html", output_data=data, user=current_user, last_search=request.form.get("project_search"))
+            return render_template("insights.html", output_data=data, user=current_user,
+                                   last_search=request.form.get("project_search"))
     else:
         cur.execute("""
-            SELECT 
-                project.project_id, 
-                project.project_name, 
-                STRING_AGG(files.old_name, ', ') AS all_old_names
-            FROM 
-                app.project AS project
-            JOIN 
-                app.project_file AS files 
-            ON 
-                files.project_id = project.project_id
-            GROUP BY 
-                project.project_id, project.project_name
-        """)
+                    SELECT project.project_id,
+                           project.project_name,
+                           STRING_AGG(files.old_name, ', ') AS all_old_names
+                    FROM app.project AS project
+                             JOIN
+                         app.project_file AS files
+                         ON
+                             files.project_id = project.project_id
+                    GROUP BY project.project_id, project.project_name
+                    """)
         data = cur.fetchall()
         cur.close()
         return render_template("insights.html", output_data=data, user=current_user)
@@ -370,7 +370,10 @@ def insightsdata():
                 if request.args.get("type_operation") == 'E':
                     project_id = request.args.get('project_id', '0')
                 for file_name in file_names:
-                    cur.execute("INSERT INTO app.project_file(project_file_id, project_id, file_name, old_name, user_id_log, user_name_log) VALUES (nextval('app.project_file_project_file_id_seq'), " + project_id + ", '" + file_name[0] + "', '" + file_name[1] + "', " + current_user.get_id() + ", '" + current_user.first_name + "')")
+                    cur.execute(
+                        "INSERT INTO app.project_file(project_file_id, project_id, file_name, old_name, user_id_log, user_name_log) VALUES (nextval('app.project_file_project_file_id_seq'), " + project_id + ", '" +
+                        file_name[0] + "', '" + file_name[
+                            1] + "', " + current_user.get_id() + ", '" + current_user.first_name + "')")
                     with db.get_allegro(project_id) as conn:
                         path = os.path.join(userfiles_dir, file_name[0])
                         conn.addFile(path, None, format=RDFFormat.TURTLE)
@@ -395,7 +398,8 @@ def insightsdata():
 
             file_to_remove = request.args.get('remove_file', '')
             if len(file_to_remove) > 0:
-                cur.execute("select file_name from app.project_file where project_id = " + project_id + " and old_name = '" + file_to_remove + "'")
+                cur.execute(
+                    "select file_name from app.project_file where project_id = " + project_id + " and old_name = '" + file_to_remove + "'")
                 file_names = cur.fetchall()
                 basedir = os.path.abspath(os.path.dirname(__file__))
                 userfiles_dir = os.path.join(basedir, 'userfiles')
@@ -403,7 +407,8 @@ def insightsdata():
                     path = os.path.join(userfiles_dir, file_name[0])
                     if os.path.exists(path):
                         os.remove(path)
-                cur.execute("delete from app.project_file where project_id = " + project_id + " and old_name = '" + file_to_remove + "'")
+                cur.execute(
+                    "delete from app.project_file where project_id = " + project_id + " and old_name = '" + file_to_remove + "'")
                 with db.get_allegro(project_id) as conn:
                     conn.clear()
 
@@ -432,6 +437,7 @@ def insightsdata():
                                , file_names=file_names
                                , project_list=data_project)
 
+
 @views.route('/rag', methods=['GET', 'POST'])
 def rag():
     """Show list of projects and action 'Ask Graph' for each project.
@@ -442,19 +448,16 @@ def rag():
     cur = db.get_cursor()
     # reuse the same query used elsewhere to list projects and their file names
     cur.execute("""
-            SELECT 
-                project.project_id, 
-                project.project_name, 
-                STRING_AGG(files.old_name, ', ') AS all_old_names 
-            FROM 
-                app.project AS project
-            JOIN 
-                app.project_file AS files 
-            ON 
-                files.project_id = project.project_id
-            GROUP BY 
-                project.project_id, project.project_name
-        """)
+                SELECT project.project_id,
+                       project.project_name,
+                       STRING_AGG(files.old_name, ', ') AS all_old_names
+                FROM app.project AS project
+                         JOIN
+                     app.project_file AS files
+                     ON
+                         files.project_id = project.project_id
+                GROUP BY project.project_id, project.project_name
+                """)
     data = cur.fetchall()
     cur.close()
 
@@ -701,34 +704,34 @@ def rag_load():
                 flash('Error answering question: ' + str(e), category='error')
 
     # GET or after POST; show form. Keep token only in page's form fields (not saved in DB)
-    return render_template('rag_load.html', user=current_user, project_id=project_id, resposta_rag=resposta_rag, graph_loaded=graph_loaded, openai_token_prefill=token_prefill)
+    return render_template('rag_load.html', user=current_user, project_id=project_id, resposta_rag=resposta_rag,
+                           graph_loaded=graph_loaded, openai_token_prefill=token_prefill)
 
 
 @views.route('/projectteam', methods=['GET', 'POST'])
 @login_required
 def projectteam():
-
     cur = db.get_cursor()
 
     if request.method == 'POST':
-        project_search = request.form.get('project_search') #Gets the note from the HTML
+        project_search = request.form.get('project_search')  # Gets the note from the HTML
         if len(project_search) < 1:
             return redirect(url_for('views.projectteam'))
         else:
             cur.execute("select ptm.project_team_id " +
-                    "     , prj.project_name " +
-                    "     , usr.first_name " +
-                    "     , case when ptm.st_user_leader = 1 then 'X' else '' end st_user_leader " +
-                    "from app.project prj " +
-                    "     , app.user usr " +
-                    "     , app.project_team ptm " +
-                    "where prj.project_id = ptm.project_id " +
-                    "  and usr.id = ptm.user_id " +
-                    "  and upper(project_name) like upper('%" + request.form.get("project_search") + "%')" +
-                    " order by prj.project_name asc, ptm.st_user_leader desc, usr.first_name asc")
+                        "     , prj.project_name " +
+                        "     , usr.first_name " +
+                        "     , case when ptm.st_user_leader = 1 then 'X' else '' end st_user_leader " +
+                        "from app.project prj " +
+                        "     , app.user usr " +
+                        "     , app.project_team ptm " +
+                        "where prj.project_id = ptm.project_id " +
+                        "  and usr.id = ptm.user_id " +
+                        "  and upper(project_name) like upper('%" + request.form.get("project_search") + "%')" +
+                        " order by prj.project_name asc, ptm.st_user_leader desc, usr.first_name asc")
             data = cur.fetchall()
             cur.close()
-            return render_template("projectteam.html", output_data = data, user=current_user)
+            return render_template("projectteam.html", output_data=data, user=current_user)
     else:
         cur.execute("select ptm.project_team_id " +
                     "     , prj.project_name " +
@@ -743,77 +746,83 @@ def projectteam():
 
         data = cur.fetchall()
         cur.close()
-        return render_template("projectteam.html", output_data = data, user=current_user)
+        return render_template("projectteam.html", output_data=data, user=current_user)
+
 
 @views.route('/modifyuser', methods=['GET', 'POST'])
 @login_required
 def modifyuser():
-
-    cur=db.get_cursor()
+    cur = db.get_cursor()
 
     if request.method == 'POST':
-        project_search = request.form.get('username_search') #Gets the note from the HTML
+        project_search = request.form.get('username_search')  # Gets the note from the HTML
         if len(project_search) < 1:
             cur.execute("select id, first_name, email, user_type_id from app.user order by first_name")
             data = cur.fetchall()
             cur.close()
-            return render_template("modifyuser.html", output_data = data, user=current_user)
+            return render_template("modifyuser.html", output_data=data, user=current_user)
         else:
-            cur.execute("select id, first_name, email, user_type_id from app.user  where upper(first_name) like upper('%" + request.form.get('username_search') + "%') order by first_name")
+            cur.execute(
+                "select id, first_name, email, user_type_id from app.user  where upper(first_name) like upper('%" + request.form.get(
+                    'username_search') + "%') order by first_name")
             data = cur.fetchall()
             cur.close()
-            return render_template("modifyuser.html", output_data = data, user=current_user)
+            return render_template("modifyuser.html", output_data=data, user=current_user)
     else:
         cur.execute("select id, first_name, email, user_type_id from app.user order by first_name")
         data = cur.fetchall()
         cur.close()
-        return render_template("modifyuser.html", output_data = data, user=current_user)
+        return render_template("modifyuser.html", output_data=data, user=current_user)
 
 
 @views.route('/usertype', methods=['GET', 'POST'])
 @login_required
 def usertype():
     if request.method == 'POST':
-        usertype_search = request.form.get('usertype_search') #Gets the note from the HTML
+        usertype_search = request.form.get('usertype_search')  # Gets the note from the HTML
         if len(usertype_search) < 1:
-            cur=db.get_cursor()
+            cur = db.get_cursor()
             cur.execute("SELECT * FROM app.user_type  order by user_type_name")
             data = cur.fetchall()
             cur.close()
-            return render_template("usertype.html", output_data = data, user=current_user)
+            return render_template("usertype.html", output_data=data, user=current_user)
         else:
-            cur=db.get_cursor()
-            cur.execute("SELECT * FROM app.user_type where upper(user_type_name) like upper('%" + request.form.get("usertype_search") + "%') order by user_type_name")
+            cur = db.get_cursor()
+            cur.execute("SELECT * FROM app.user_type where upper(user_type_name) like upper('%" + request.form.get(
+                "usertype_search") + "%') order by user_type_name")
             data = cur.fetchall()
             cur.close()
-            return render_template("usertype.html", output_data = data, user=current_user)
+            return render_template("usertype.html", output_data=data, user=current_user)
 
     else:
-        cur=db.get_cursor()
+        cur = db.get_cursor()
         cur.execute("SELECT * FROM app.user_type order by user_type_name")
         data = cur.fetchall()
 
         cur.close()
 
-        return render_template("usertype.html", output_data = data, user=current_user)
+        return render_template("usertype.html", output_data=data, user=current_user)
+
 
 @views.route('/researchline', methods=['GET', 'POST'])
 @login_required
 def researchline():
     if request.method == 'POST':
-        researchline_search = request.form.get('researchline_search') #Gets the note from the HTML
+        researchline_search = request.form.get('researchline_search')  # Gets the note from the HTML
         if len(researchline_search) < 1:
-            cur=db.get_cursor()
+            cur = db.get_cursor()
             cur.execute("SELECT * FROM app.research_line  order by research_line_name")
             data = cur.fetchall()
             cur.close()
-            return render_template("researchline.html", output_data = data, user=current_user)
+            return render_template("researchline.html", output_data=data, user=current_user)
         else:
-            cur=db.get_cursor()
-            cur.execute("SELECT * FROM app.research_line where upper(research_line_name) like upper('%" + request.form.get("researchline_search") + "%') order by research_line_name")
+            cur = db.get_cursor()
+            cur.execute(
+                "SELECT * FROM app.research_line where upper(research_line_name) like upper('%" + request.form.get(
+                    "researchline_search") + "%') order by research_line_name")
             data = cur.fetchall()
             cur.close()
-            return render_template("researchline.html", output_data = data, user=current_user)
+            return render_template("researchline.html", output_data=data, user=current_user)
     else:
 
         cur = db.get_cursor()
@@ -822,13 +831,12 @@ def researchline():
 
         cur.close()
 
-        return render_template("researchline.html", output_data = data, user=current_user)
+        return render_template("researchline.html", output_data=data, user=current_user)
 
 
-@views.route('/usertypedata', methods= ['GET', 'POST'])
+@views.route('/usertypedata', methods=['GET', 'POST'])
 def usertypedata():
-
-    cur=db.get_cursor()
+    cur = db.get_cursor()
     cur.execute("SELECT * FROM app.user_type order by user_type_name")
     data = cur.fetchall()
 
@@ -849,26 +857,29 @@ def usertypedata():
                 return redirect(url_for('views.usertype'))
 
             else:
-                cur.execute("update app.user_type set user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "'  where user_type_id = " + user_type_id)
+                cur.execute(
+                    "update app.user_type set user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "'  where user_type_id = " + user_type_id)
                 cur.execute("delete from app.user_type where user_type_id = " + user_type_id)
                 cur.close()
                 flash('Data deleted!', category='success')
                 return redirect(url_for('views.usertype'))
 
         if request.args.get('type_operation', '') == 'A':
-            cur.execute("insert into app.user_type (user_type_id, user_type_name, user_id_log, user_name_log) values (nextval('app.user_type_user_type_id_seq'), '" + user_type_name + "', " + current_user.get_id()  + ", '" + current_user.first_name  + "')")
+            cur.execute(
+                "insert into app.user_type (user_type_id, user_type_name, user_id_log, user_name_log) values (nextval('app.user_type_user_type_id_seq'), '" + user_type_name + "', " + current_user.get_id() + ", '" + current_user.first_name + "')")
             cur.close()
             flash('Data inserted!', category='success')
             return redirect(url_for('views.usertype'))
 
         if request.args.get('type_operation', '') == 'U':
-            cur.execute("update app.user_type set user_type_name = '" + user_type_name + "', user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "'  where user_type_id = " + user_type_id)
+            cur.execute(
+                "update app.user_type set user_type_name = '" + user_type_name + "', user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "'  where user_type_id = " + user_type_id)
             cur.close()
             flash('Data updated!', category='success')
             return redirect(url_for('views.usertype'))
 
         cur.close()
-        return render_template("usertype.html", output_data = data, user=current_user)
+        return render_template("usertype.html", output_data=data, user=current_user)
 
     if request.method == 'GET':
 
@@ -888,12 +899,13 @@ def usertypedata():
 
         cur.close()
 
-        return render_template("usertypedata.html", user=current_user, user_type_id = user_type_id, user_type_name = user_type_name,  usertype_list = data_user_type, type_operation = type_operation)
+        return render_template("usertypedata.html", user=current_user, user_type_id=user_type_id,
+                               user_type_name=user_type_name, usertype_list=data_user_type,
+                               type_operation=type_operation)
 
 
-@views.route('/researchlinedata', methods= ['GET', 'POST'])
+@views.route('/researchlinedata', methods=['GET', 'POST'])
 def researchlinedata():
-
     if request.method == 'POST':
 
         cur = db.get_cursor()
@@ -906,7 +918,8 @@ def researchlinedata():
             research_line_project_item = 0
             cur.execute("SELECT count(0) FROM app.project where research_line_id = " + research_line_id)
             research_line_project = cur.fetchall()
-            research_line_project_item = [research_line_project_item[0] for research_line_project_item in research_line_project]
+            research_line_project_item = [research_line_project_item[0] for research_line_project_item in
+                                          research_line_project]
 
             if int(research_line_project_item[0]) > 0:
                 flash('There are projects using this research line!', category='error')
@@ -914,20 +927,23 @@ def researchlinedata():
                 return redirect(url_for('views.researchline'))
 
             else:
-                cur.execute("update app.research_line set user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "'  where research_line_id = " + research_line_id)
+                cur.execute(
+                    "update app.research_line set user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "'  where research_line_id = " + research_line_id)
                 cur.execute("delete from app.research_line where research_line_id = " + research_line_id)
                 cur.close()
                 flash('Data deleted!', category='success')
                 return redirect(url_for('views.researchline'))
 
         if request.args.get('type_operation', '') == 'A':
-            cur.execute("insert into app.research_line (research_line_name, user_id_log, user_name_log) values ('" + research_line_name + "', " + current_user.get_id()  + ", '" + current_user.first_name  + "')")
+            cur.execute(
+                "insert into app.research_line (research_line_name, user_id_log, user_name_log) values ('" + research_line_name + "', " + current_user.get_id() + ", '" + current_user.first_name + "')")
             cur.close()
             flash('Data inserted!', category='success')
             return redirect(url_for('views.researchline'))
 
         if request.args.get('type_operation', '') == 'U':
-            cur.execute("update app.research_line set research_line_name = '" + research_line_name + "', user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "' where research_line_id = " + research_line_id)
+            cur.execute(
+                "update app.research_line set research_line_name = '" + research_line_name + "', user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "' where research_line_id = " + research_line_id)
             cur.close()
             flash('Data updated!', category='success')
             return redirect(url_for('views.researchline'))
@@ -935,7 +951,7 @@ def researchlinedata():
         cur.execute("SELECT * FROM app.research_line order by research_line_name")
         data = cur.fetchall()
         cur.close()
-        return render_template("researchline.html", output_data = data, user=current_user)
+        return render_template("researchline.html", output_data=data, user=current_user)
 
     if request.method == 'GET':
 
@@ -955,39 +971,43 @@ def researchlinedata():
 
         cur.close()
 
-        return render_template("researchlinedata.html", user=current_user, research_line_id = research_line_id, research_line_name = research_line_name,  researchline_list = data_research_line, type_operation = type_operation)
+        return render_template("researchlinedata.html", user=current_user, research_line_id=research_line_id,
+                               research_line_name=research_line_name, researchline_list=data_research_line,
+                               type_operation=type_operation)
+
 
 @views.route('/projectresearch', methods=['GET', 'POST'])
 @login_required
 def projectresearch():
     if request.method == 'POST':
-        project_search = request.form.get('project_search') #Gets the note from the HTML
+        project_search = request.form.get('project_search')  # Gets the note from the HTML
         if len(project_search) < 1:
             cur = db.get_cursor()
             cur.execute("SELECT * FROM app.project order by project_name")
             data = cur.fetchall()
             cur.close()
-            return render_template("projectresearch.html", output_data = data, user=current_user)
+            return render_template("projectresearch.html", output_data=data, user=current_user)
         else:
-            cur=db.get_cursor()
-            cur.execute("SELECT * FROM app.project where upper(project_name) like upper('%" + request.form.get("project_search") + "%') order by project_name")
+            cur = db.get_cursor()
+            cur.execute("SELECT * FROM app.project where upper(project_name) like upper('%" + request.form.get(
+                "project_search") + "%') order by project_name")
             data = cur.fetchall()
             cur.close()
-            return render_template("projectresearch.html", output_data = data, user=current_user)
+            return render_template("projectresearch.html", output_data=data, user=current_user)
     else:
         cur = db.get_cursor()
         cur.execute("SELECT * FROM app.project order by project_name")
         data = cur.fetchall()
         cur.close()
 
-        return render_template("projectresearch.html", output_data = data, user=current_user)
+        return render_template("projectresearch.html", output_data=data, user=current_user)
 
-@views.route('/projectdata', methods= ['GET', 'POST'])
+
+@views.route('/projectdata', methods=['GET', 'POST'])
 def projectdata():
-
     if request.method == 'POST':
 
-        cur=db.get_cursor()
+        cur = db.get_cursor()
         project_id = request.form.get("project_id")
         project_name = request.form.get("project_name")
         project_description = request.form.get("project_description")
@@ -1008,20 +1028,23 @@ def projectdata():
                     cur.close()
                     return redirect(url_for('views.projectresearch'))
                 else:
-                    cur.execute("update app.project set user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "'  where project_id = " + project_id)
+                    cur.execute(
+                        "update app.project set user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "'  where project_id = " + project_id)
                     cur.execute("delete from app.project where project_id = " + project_id)
                     cur.close()
                     flash('Data deleted!', category='success')
                     return redirect(url_for('views.projectresearch'))
 
             if request.args.get('type_operation', '') == 'A':
-                cur.execute("insert into app.project (project_id, project_name, project_description, research_line_id, user_id_log, user_name_log) values (nextval('app.project_project_id_seq'), '" + project_name + "', '" + project_description +  "' , " + research_line_id + ", " + current_user.get_id()  + ", '" + current_user.first_name  + "')")
+                cur.execute(
+                    "insert into app.project (project_id, project_name, project_description, research_line_id, user_id_log, user_name_log) values (nextval('app.project_project_id_seq'), '" + project_name + "', '" + project_description + "' , " + research_line_id + ", " + current_user.get_id() + ", '" + current_user.first_name + "')")
                 cur.close()
                 flash('Data inserted!', category='success')
                 return redirect(url_for('views.projectresearch'))
 
             if request.args.get('type_operation', '') == 'U':
-                cur.execute("update app.project set project_name = '" + project_name + "', project_description = '" + project_description + "' , research_line_id = " + research_line_id + ", user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "' where project_id = " + project_id)
+                cur.execute(
+                    "update app.project set project_name = '" + project_name + "', project_description = '" + project_description + "' , research_line_id = " + research_line_id + ", user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "' where project_id = " + project_id)
                 cur.close()
                 flash('Data updated!', category='success')
                 return redirect(url_for('views.projectresearch'))
@@ -1029,7 +1052,7 @@ def projectdata():
         cur.execute("SELECT * FROM app.project order by project_name")
         data = cur.fetchall()
         cur.close()
-        return render_template("projectresearch.html", output_data = data, user=current_user)
+        return render_template("projectresearch.html", output_data=data, user=current_user)
 
     if request.method == 'GET':
         project_id = request.args.get('project_id', '')
@@ -1043,29 +1066,32 @@ def projectdata():
         else:
             type_operation = 'Add'
 
-        cur=db.get_cursor()
+        cur = db.get_cursor()
 
         research_line_name = [0]
 
         if project_id != '':
-            cur.execute("select rsh.research_line_name " 
+            cur.execute("select rsh.research_line_name "
                         "from app.project prj "
                         "   , app.research_line rsh "
                         "where rsh.research_line_id = prj.research_line_id "
                         "and prj.project_id = " + project_id + "")
             research_line_name_project = cur.fetchall()
-            research_line_name = [research_line_name_project_item[0] for research_line_name_project_item in research_line_name_project]
+            research_line_name = [research_line_name_project_item[0] for research_line_name_project_item in
+                                  research_line_name_project]
 
         cur.execute("select research_line_id, research_line_name from app.research_line order by research_line_name")
         data_research_line = cur.fetchall()
 
         cur.close()
 
-        return render_template("projectdata.html", user=current_user, project_id = project_id, project_name = project_name, project_description = project_description, researchline_name = research_line_name[0], researchline_list = data_research_line, type_operation = type_operation)
+        return render_template("projectdata.html", user=current_user, project_id=project_id, project_name=project_name,
+                               project_description=project_description, researchline_name=research_line_name[0],
+                               researchline_list=data_research_line, type_operation=type_operation)
 
-@views.route('/modifyuserdata', methods= ['GET', 'POST'])
+
+@views.route('/modifyuserdata', methods=['GET', 'POST'])
 def modifyuserdata():
-
     if request.method == 'POST':
         user_id = request.form.get('user_id', '')
         user_type_id = request.form.get("user_type_id")
@@ -1089,7 +1115,8 @@ def modifyuserdata():
                 return redirect(url_for('views.modifyuser'))
 
             else:
-                cur.execute("update app.user set user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "'  where id = " + user_id)
+                cur.execute(
+                    "update app.user set user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "'  where id = " + user_id)
                 cur.execute("delete from app.user where id = " + user_id)
                 cur.close()
                 flash('Data deleted!', category='success')
@@ -1108,8 +1135,10 @@ def modifyuserdata():
                 return redirect(url_for('views.modifyuser'))
 
             else:
-                cur.execute("update app.user set first_name = '" + first_name + "', user_type_id = " + user_type_id + ", password = '" + generate_password_hash(
-                password1, method='pbkdf2:sha256') + "', user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "'  where id = " + user_id)
+                cur.execute(
+                    "update app.user set first_name = '" + first_name + "', user_type_id = " + user_type_id + ", password = '" + generate_password_hash(
+                        password1,
+                        method='pbkdf2:sha256') + "', user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "'  where id = " + user_id)
                 flash('Data updated!', category='success')
                 cur.close()
                 return redirect(url_for('views.modifyuser'))
@@ -1120,7 +1149,7 @@ def modifyuserdata():
 
         cur.close()
 
-        return render_template("modifyuser.html", output_data = data, user=current_user)
+        return render_template("modifyuser.html", output_data=data, user=current_user)
 
     if request.method == 'GET':
         user_id = request.args.get('user_id', '')
@@ -1136,11 +1165,11 @@ def modifyuserdata():
         cur = db.get_cursor()
         user_type_name_user = [0]
 
-        cur.execute("select ust.user_type_name " 
-                        " from app.user usr "
-                        "   , app.user_type ust "
-                        " where usr.user_type_id = ust.user_type_id "
-                        " and usr.id = " + user_id + "")
+        cur.execute("select ust.user_type_name "
+                    " from app.user usr "
+                    "   , app.user_type ust "
+                    " where usr.user_type_id = ust.user_type_id "
+                    " and usr.id = " + user_id + "")
         user_type_name = cur.fetchall()
         if len(user_type_name) > 0:
             user_type_name_user = [user_type_name_item[0] for user_type_name_item in user_type_name]
@@ -1151,16 +1180,16 @@ def modifyuserdata():
         cur.close()
 
         return render_template("modifyuserdata.html", user=current_user
-                                                    , user_id = user_id
-                                                    , first_name = first_name
-                                                    , email = email
-                                                    , user_type_name = user_type_name_user[0]
-                                                    , usertype_list = data_user_type
-                                                    , type_operation = type_operation)
+                               , user_id=user_id
+                               , first_name=first_name
+                               , email=email
+                               , user_type_name=user_type_name_user[0]
+                               , usertype_list=data_user_type
+                               , type_operation=type_operation)
 
-@views.route('/projectteamdata', methods= ['GET', 'POST'])
+
+@views.route('/projectteamdata', methods=['GET', 'POST'])
 def projectTeamData():
-
     if request.method == 'POST':
 
         cur = db.get_cursor()
@@ -1172,7 +1201,8 @@ def projectTeamData():
 
         project_team = [0]
         project_team_item = 0
-        cur.execute("SELECT count(0) FROM app.project_team where user_id = " + user_id + " and project_id = " + project_id + "")
+        cur.execute(
+            "SELECT count(0) FROM app.project_team where user_id = " + user_id + " and project_id = " + project_id + "")
         project_team = cur.fetchall()
         project_team_item = [project_team_item_item[0] for project_team_item_item in project_team]
 
@@ -1183,7 +1213,8 @@ def projectTeamData():
 
         else:
             if request.args.get("type_operation") == 'D':
-                cur.execute("update app.project_team set user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "'  where project_team_id = " + project_team_id)
+                cur.execute(
+                    "update app.project_team set user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "'  where project_team_id = " + project_team_id)
                 cur.execute("delete from app.project_team where project_team_id = " + project_team_id)
                 cur.close()
                 flash('Data deleted!', category='success')
@@ -1197,32 +1228,34 @@ def projectTeamData():
                     return redirect(url_for('views.projectteam'))
 
                 else:
-                    cur.execute("INSERT INTO app.project_team(project_team_id, project_id, user_id, st_user_leader, user_id_log, user_name_log)	VALUES (nextval('app.project_team_project_team_id_seq'), " + project_id + ", " + user_id + ", " + st_user_leader + ", " + current_user.get_id()  + ", '" + current_user.first_name  + "')")
+                    cur.execute(
+                        "INSERT INTO app.project_team(project_team_id, project_id, user_id, st_user_leader, user_id_log, user_name_log)	VALUES (nextval('app.project_team_project_team_id_seq'), " + project_id + ", " + user_id + ", " + st_user_leader + ", " + current_user.get_id() + ", '" + current_user.first_name + "')")
                     cur.close()
                     flash('Data inserted!', category='success')
                     return redirect(url_for('views.projectteam'))
 
             if request.args.get("type_operation") == 'U':
-                cur.execute("UPDATE app.project_team SET st_user_leader  = " + st_user_leader +  ", user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "' where project_team_id = " + project_team_id)
+                cur.execute(
+                    "UPDATE app.project_team SET st_user_leader  = " + st_user_leader + ", user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "' where project_team_id = " + project_team_id)
                 cur.close()
                 flash('Data updated!', category='success')
                 return redirect(url_for('views.projectteam'))
 
         cur.execute("select ptm.project_team_id " +
-                "     , prj.project_name " +
-                "     , usr.first_name " +
-                "     , case when ptm.st_user_leader = 1 then 'X' else '' end st_user_leader " +
-                "from app.project prj " +
-                "     , app.user usr " +
-                "     , app.project_team ptm " +
-                "where prj.project_id = ptm.project_id " +
-                "  and usr.id = ptm.user_id " +
-                " order by prj.project_name asc, ptm.st_user_leader desc, usr.first_name asc")
+                    "     , prj.project_name " +
+                    "     , usr.first_name " +
+                    "     , case when ptm.st_user_leader = 1 then 'X' else '' end st_user_leader " +
+                    "from app.project prj " +
+                    "     , app.user usr " +
+                    "     , app.project_team ptm " +
+                    "where prj.project_id = ptm.project_id " +
+                    "  and usr.id = ptm.user_id " +
+                    " order by prj.project_name asc, ptm.st_user_leader desc, usr.first_name asc")
         data = cur.fetchall()
 
         cur.close()
 
-        return render_template("projectteam.html", output_data = data, user=current_user)
+        return render_template("projectteam.html", output_data=data, user=current_user)
 
     if request.method == 'GET':
         project_team_id = request.args.get('project_team_id', '')
@@ -1259,13 +1292,18 @@ def projectTeamData():
                         "     , app.project_team ptm " +
                         "where prj.project_id = ptm.project_id " +
                         "  and usr.id = ptm.user_id " +
-                        "  and ptm.project_team_id = "+ project_team_id +"")
+                        "  and ptm.project_team_id = " + project_team_id + "")
             team_member_project_team_id = cur.fetchall()
-            project_name = [team_member_project_team_id_item[1] for team_member_project_team_id_item in team_member_project_team_id]
-            first_name = [team_member_project_team_id_item[2] for team_member_project_team_id_item in team_member_project_team_id]
-            user_id = [team_member_project_team_id_item[4] for team_member_project_team_id_item in team_member_project_team_id]
-            project_id = [team_member_project_team_id_item[5] for team_member_project_team_id_item in team_member_project_team_id]
-            st_user_leader = [team_member_project_team_id_item[3] for team_member_project_team_id_item in team_member_project_team_id]
+            project_name = [team_member_project_team_id_item[1] for team_member_project_team_id_item in
+                            team_member_project_team_id]
+            first_name = [team_member_project_team_id_item[2] for team_member_project_team_id_item in
+                          team_member_project_team_id]
+            user_id = [team_member_project_team_id_item[4] for team_member_project_team_id_item in
+                       team_member_project_team_id]
+            project_id = [team_member_project_team_id_item[5] for team_member_project_team_id_item in
+                          team_member_project_team_id]
+            st_user_leader = [team_member_project_team_id_item[3] for team_member_project_team_id_item in
+                              team_member_project_team_id]
 
         cur.execute("select ptm.project_team_id " +
                     "     , prj.project_name " +
@@ -1281,38 +1319,37 @@ def projectTeamData():
         cur.close()
 
         return render_template("projectteamdata.html", user=current_user
-                                                     , project_team_id = project_team_id
-                                                     , project_id = project_id
-                                                     , user_id = user_id
-                                                     , st_user_leader = st_user_leader[0]
-                                                     , project_name = project_name[0]
-                                                     , first_name = first_name[0]
-                                                     , team_list = data_team
-                                                     , project_list = data_project
-                                                     , user_list = data_user
-                                                     , type_operation = type_operation)
+                               , project_team_id=project_team_id
+                               , project_id=project_id
+                               , user_id=user_id
+                               , st_user_leader=st_user_leader[0]
+                               , project_name=project_name[0]
+                               , first_name=first_name[0]
+                               , team_list=data_team
+                               , project_list=data_project
+                               , user_list=data_user
+                               , type_operation=type_operation)
 
 
 @views.route('/caqdas', methods=['GET', 'POST'])
 @login_required
 def caqdas():
-
     cur = db.get_cursor()
 
     if request.method == 'POST':
-        caqdas_search = request.form.get('caqdas_search') #Gets the note from the HTML
+        caqdas_search = request.form.get('caqdas_search')  # Gets the note from the HTML
         if len(caqdas_search) < 1:
             return redirect(url_for('views.caqdas'))
         else:
             cur.execute("select caqdas.caqdas_id " +
-                    "     , caqdas.caqdas_name " +
-                    "     , caqdas.code_export_type_file " +
-                    "from app.caqdas caqdas " +
-                    "where upper(caqdas.caqdas_name) like upper('%" + request.form.get("caqdas_search") + "%')" +
-                    " order by caqdas.caqdas_name asc")
+                        "     , caqdas.caqdas_name " +
+                        "     , caqdas.code_export_type_file " +
+                        "from app.caqdas caqdas " +
+                        "where upper(caqdas.caqdas_name) like upper('%" + request.form.get("caqdas_search") + "%')" +
+                        " order by caqdas.caqdas_name asc")
             data = cur.fetchall()
             cur.close()
-            return render_template("caqdas.html", output_data = data, user=current_user)
+            return render_template("caqdas.html", output_data=data, user=current_user)
     else:
         cur.execute("select caqdas.caqdas_id " +
                     "     , caqdas.caqdas_name " +
@@ -1322,11 +1359,11 @@ def caqdas():
 
         data = cur.fetchall()
         cur.close()
-        return render_template("caqdas.html", output_data = data, user=current_user)
+        return render_template("caqdas.html", output_data=data, user=current_user)
 
-@views.route('/caqdasdata', methods= ['GET', 'POST'])
+
+@views.route('/caqdasdata', methods=['GET', 'POST'])
 def caqdasdata():
-
     if request.method == 'POST':
 
         cur = db.get_cursor()
@@ -1348,20 +1385,23 @@ def caqdasdata():
                 return redirect(url_for('views.caqdas'))
 
             else:
-                cur.execute("update app.caqdas set user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "'  where caqdas_id = " + caqdas_id)
+                cur.execute(
+                    "update app.caqdas set user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "'  where caqdas_id = " + caqdas_id)
                 cur.execute("delete from app.caqdas where  caqdas_id = " + caqdas_id)
                 cur.close()
                 flash('Data deleted!', category='success')
                 return redirect(url_for('views.caqdas'))
 
         if request.args.get('type_operation', '') == 'A':
-            cur.execute("insert into app.caqdas (caqdas_name, code_export_type_file, user_id_log, user_name_log) values ('" + caqdas_name + "', '" + code_export_type_file + "', " + current_user.get_id()  + ", '" + current_user.first_name  + "')")
+            cur.execute(
+                "insert into app.caqdas (caqdas_name, code_export_type_file, user_id_log, user_name_log) values ('" + caqdas_name + "', '" + code_export_type_file + "', " + current_user.get_id() + ", '" + current_user.first_name + "')")
             cur.close()
             flash('Data inserted!', category='success')
             return redirect(url_for('views.caqdas'))
 
         if request.args.get('type_operation', '') == 'U':
-            cur.execute("update app.caqdas set caqdas_name = '" + caqdas_name + "', user_id_log = " + current_user.get_id()  + ", user_name_log = '" + current_user.first_name  + "' where caqdas_id = " + caqdas_id)
+            cur.execute(
+                "update app.caqdas set caqdas_name = '" + caqdas_name + "', user_id_log = " + current_user.get_id() + ", user_name_log = '" + current_user.first_name + "' where caqdas_id = " + caqdas_id)
             cur.close()
             flash('Data updated!', category='success')
             return redirect(url_for('views.caqdas'))
@@ -1369,7 +1409,7 @@ def caqdasdata():
         cur.execute("SELECT * FROM app.caqdas order by caqdas_name")
         data = cur.fetchall()
         cur.close()
-        return render_template("caqdas.html", output_data = data, user=current_user)
+        return render_template("caqdas.html", output_data=data, user=current_user)
 
     if request.method == 'GET':
 
@@ -1390,7 +1430,9 @@ def caqdasdata():
 
         cur.close()
 
-        return render_template("caqdasdata.html", user=current_user, caqdas_id = caqdas_id, caqdas_name = caqdas_name, code_export_type_file = code_export_type_file,  data_caqdas = data_caqdas_list, type_operation = type_operation)
+        return render_template("caqdasdata.html", user=current_user, caqdas_id=caqdas_id, caqdas_name=caqdas_name,
+                               code_export_type_file=code_export_type_file, data_caqdas=data_caqdas_list,
+                               type_operation=type_operation)
 
 
 @views.route('/uploadonto', methods=['POST'])
@@ -1463,11 +1505,11 @@ def api_graph():
         with db.get_allegro(project_id) as conn:
             with conn.executeTupleQuery(sparql) as results:
                 for result in results:
-                    s_uri  = str(result.getValue('s_uri')).replace('"', '')
+                    s_uri = str(result.getValue('s_uri')).replace('"', '')
                     s_name = str(result.getValue('s_name')).replace('"', '')
                     s_type = str(result.getValue('s_type_name')).replace('"', '')
-                    label  = str(result.getValue('label')).replace('"', '')
-                    o_uri  = str(result.getValue('o_uri')).replace('"', '')
+                    label = str(result.getValue('label')).replace('"', '')
+                    o_uri = str(result.getValue('o_uri')).replace('"', '')
                     o_name = str(result.getValue('o_name')).replace('"', '')
                     o_type = str(result.getValue('o_type_name')).replace('"', '')
 
@@ -1496,10 +1538,10 @@ def _sanitize_filename(name: str) -> str:
 @views.route('/api/export/owl', methods=['POST'])
 @login_required
 def export_owl():
-    data     = request.json
-    nodes    = data.get('nodes', [])
-    edges    = data.get('edges', [])
-    iri      = data.get('iri',  'http://homogenise.example.org/ontology#')
+    data = request.json
+    nodes = data.get('nodes', [])
+    edges = data.get('edges', [])
+    iri = data.get('iri', 'http://homogenise.example.org/ontology#')
     ont_name = data.get('name', 'ontology')
 
     onto = get_ontology(iri)
@@ -1519,7 +1561,7 @@ def export_owl():
         for edge in edges:
             src_id = edge['source']['id'] if isinstance(edge['source'], dict) else edge['source']
             tgt_id = edge['target']['id'] if isinstance(edge['target'], dict) else edge['target']
-            label  = edge.get('label', '')
+            label = edge.get('label', '')
 
             src = classes.get(src_id)
             tgt = classes.get(tgt_id)
@@ -1559,24 +1601,33 @@ _OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')
 
 def _to_pascal(name: str) -> str:
     replacements = {
-        'á':'a','à':'a','ã':'a','â':'a','ä':'a',
-        'é':'e','ê':'e','ë':'e',
-        'í':'i','î':'i','ï':'i',
-        'ó':'o','ô':'o','õ':'o','ö':'o',
-        'ú':'u','û':'u','ü':'u',
-        'ç':'c','ñ':'n',
-        'Á':'A','À':'A','Ã':'A','Â':'A',
-        'É':'E','Ê':'E',
-        'Í':'I','Î':'I',
-        'Ó':'O','Ô':'O','Õ':'O',
-        'Ú':'U','Û':'U',
-        'Ç':'C','Ñ':'N',
+        'á': 'a', 'à': 'a', 'ã': 'a', 'â': 'a', 'ä': 'a',
+        'é': 'e', 'ê': 'e', 'ë': 'e',
+        'í': 'i', 'î': 'i', 'ï': 'i',
+        'ó': 'o', 'ô': 'o', 'õ': 'o', 'ö': 'o',
+        'ú': 'u', 'û': 'u', 'ü': 'u',
+        'ç': 'c', 'ñ': 'n',
+        'Á': 'A', 'À': 'A', 'Ã': 'A', 'Â': 'A',
+        'É': 'E', 'Ê': 'E',
+        'Í': 'I', 'Î': 'I',
+        'Ó': 'O', 'Ô': 'O', 'Õ': 'O',
+        'Ú': 'U', 'Û': 'U',
+        'Ç': 'C', 'Ñ': 'N',
     }
     for k, v in replacements.items():
         name = name.replace(k, v)
     if name.isupper():
         name = name.capitalize()
     return name
+
+
+def _is_invalid_name(name) -> bool:
+    """Rejeita nomes de nó que o modelo às vezes alucina: o literal 'null'/'none',
+    string vazia, ou o próprio None. Evita criar nós-lixo no grafo."""
+    if name is None:
+        return True
+    s = str(name).strip().lower()
+    return s in ("", "null", "none", "nan", "undefined")
 
 
 def _process_suggestion(suggestions):
@@ -1692,7 +1743,8 @@ REGRAS:
         start = time.time()
         resp = http_requests.post(
             f"{_OLLAMA_HOST}/api/chat",
-            json={"model": "granite3.3:8b", "messages": messages, "stream": False, "format": schema, "options": {"temperature": 0.5}},
+            json={"model": "granite3.3:8b", "messages": messages, "stream": False, "format": schema,
+                  "options": {"temperature": 0.5}},
             timeout=450
         )
         resp.raise_for_status()
@@ -1701,7 +1753,8 @@ REGRAS:
 
         parsed = json.loads(resp.json()["message"]["content"].strip())
 
-        op_map = {"add_node": "createNode", "remove_node": "removeNode", "add_edge": "createEdge", "remove_edge": "removeEdge"}
+        op_map = {"add_node": "createNode", "remove_node": "removeNode", "add_edge": "createEdge",
+                  "remove_edge": "removeEdge"}
         suggestions = []
         warnings = list(parsed.get("warnings", []))
         existing_names = {n["name"] for n in nodes}
@@ -1721,11 +1774,14 @@ REGRAS:
                 if node["name"] in existing_names:
                     warnings.append(f"add_node ignorado, nó já existe: {node['name']}")
                 else:
-                    suggestions.append({"action": action, "id": str(uuid.uuid4()), "name": node["name"], "type": node.get("type", "Class"), "reason": reason})
+                    suggestions.append({"action": action, "id": str(uuid.uuid4()), "name": node["name"],
+                                        "type": node.get("type", "Class"), "reason": reason})
                     existing_names.add(node["name"])
                 edge = op.get("edge")
                 if edge and all(k in edge for k in ("source_name", "target_name", "label")):
-                    suggestions.append({"action": "createEdge", "id": str(uuid.uuid4()), "source": edge["source_name"], "target": edge["target_name"], "label": edge["label"], "reason": f"(aresta de add_node) {reason}"})
+                    suggestions.append({"action": "createEdge", "id": str(uuid.uuid4()), "source": edge["source_name"],
+                                        "target": edge["target_name"], "label": edge["label"],
+                                        "reason": f"(aresta de add_node) {reason}"})
 
             elif op["op"] == "remove_node":
                 node = op.get("node")
@@ -1745,18 +1801,23 @@ REGRAS:
                 if edge["target_name"] not in existing_names:
                     warnings.append(f"add_edge ignorado, destino não existe: {edge['target_name']}")
                     continue
-                suggestions.append({"action": action, "id": str(uuid.uuid4()), "source": edge["source_name"], "target": edge["target_name"], "label": edge["label"], "reason": reason})
+                suggestions.append({"action": action, "id": str(uuid.uuid4()), "source": edge["source_name"],
+                                    "target": edge["target_name"], "label": edge["label"], "reason": reason})
 
             elif op["op"] == "remove_edge":
                 edge = op.get("edge")
                 if not edge or not all(k in edge for k in ("source_name", "target_name", "label")):
                     warnings.append(f"remove_edge incompleto ignorado: {reason}")
                     continue
-                existing_edges = {(id_to_name.get(e["source"], e["source"]), id_to_name.get(e["target"], e["target"]), e["label"]) for e in edges}
+                existing_edges = {
+                    (id_to_name.get(e["source"], e["source"]), id_to_name.get(e["target"], e["target"]), e["label"]) for
+                    e in edges}
                 if (edge["source_name"], edge["target_name"], edge["label"]) not in existing_edges:
-                    warnings.append(f"remove_edge ignorado, aresta não existe: {edge['source_name']} → {edge['target_name']}")
+                    warnings.append(
+                        f"remove_edge ignorado, aresta não existe: {edge['source_name']} → {edge['target_name']}")
                     continue
-                suggestions.append({"action": action, "source": edge["source_name"], "target": edge["target_name"], "label": edge["label"], "reason": reason})
+                suggestions.append({"action": action, "source": edge["source_name"], "target": edge["target_name"],
+                                    "label": edge["label"], "reason": reason})
 
         return jsonify({"ok": True, "actions": _process_suggestion(suggestions), "warnings": warnings})
 
@@ -1766,8 +1827,39 @@ REGRAS:
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _norm_label_key(s: str) -> str:
+    """Normaliza um label para comparação: minúsculas, sem acento, só alfanumérico.
+    'É um(a)' -> 'euma' ; 'Subclasse de' -> 'subclassede' ; 'é-um' -> 'eum'."""
+    import unicodedata
+    if not s:
+        return ""
+    nfkd = unicodedata.normalize('NFKD', s)
+    ascii_str = nfkd.encode('ASCII', 'ignore').decode('ASCII')
+    return re.sub(r'[^a-z0-9]', '', ascii_str.lower())
+
+
+# Mesma lista de rótulos hierárquicos do frontend (aletheia.js / isHierarchical).
+# Inclui variantes com e sem o sufixo de gênero "(a)" para casar "é um" e "é uma".
+_HIERARCHICAL_KEYS = {
+    _norm_label_key(s) for s in [
+        "subClassOf", "Sub class of", "Subclasse de", "É um(a)", "É um", "É uma",
+        "É tipo de", "É um tipo de", "É uma espécie de", "São", "Classifica-se como",
+        "Constitui um(a)", "Constitui um", "Constitui uma", "Especialização de",
+        "Subsunção", "Subsumido por", "Relação de inclusão", "Está contido em",
+        "É subconjunto de", "Implica em", "Caso particular de", "Herda de",
+        "Deriva de", "Descende de", "Filha de", "Extensão de", "Hipônimo de",
+        "Termo específico de", "Ramo de", "Categoria de", "Variante de"
+    ]
+}
+
+
 def _sanitize_label(label: str) -> str:
     if not label:
+        return "subClassOf"
+    # Canoniza QUALQUER variante hierárquica para "subClassOf" antes de tudo.
+    # Garante que o grafo e o export OWL tratem como hierarquia de classe
+    # (src.is_a.append(tgt)), não como ObjectProperty.
+    if _norm_label_key(label) in _HIERARCHICAL_KEYS:
         return "subClassOf"
     # remove palavras funcionais comuns
     stopwords = {"para", "de", "do", "da", "no", "na", "o", "a", "os", "as", "um", "uma", "e", "com"}
@@ -1861,6 +1953,13 @@ def api_generate():
     - REGRA CRÍTICA: toda entidade que aparecer em connections.source ou connections.target DEVE estar em nodes_to_create, exceto as que já existem na lista acima
     - NUNCA assuma que um nó existe se ele não estiver na lista acima
 
+    REGRA DE HIERARQUIA (INFERÊNCIA):
+    - Quando dois conceitos têm relação gênero-espécie evidente (um é um tipo/espécie/subclasse do outro), crie uma conexão hierárquica com label=null, MESMO que o verbo não apareça explicitamente no texto.
+    - Em conexões hierárquicas, source é sempre o conceito MAIS ESPECÍFICO (filho) e target o MAIS GERAL (pai). Ex.: source=Cachorro, target=Mamifero.
+    - Se um conceito específico tem um superconceito mais geral evidente, NÃO o deixe órfão: conecte-o ao pai. Quando fizer sentido, traga também o supertipo mais geral mesmo que não esteja escrito (ex.: havendo "Mamifero", o pai natural "Animal" pode ser criado e conectado).
+    - Feche a cadeia completa: se A é tipo de B e B é tipo de C, gere AS DUAS arestas (A->B e B->C), não apenas a folha.
+    - ATENÇÃO: "null" só pode aparecer no campo "label" (relação implícita). NUNCA use a palavra "null" como source ou target. Quando o texto disser "X é um Y" (ex.: "Cardiologista é um médico"), crie o nó Y (ex.: "Medico") e a aresta X->Y com label=null. O target deve ser sempre um conceito real, nunca null.
+
     EXEMPLOS:
     Texto: "O psiquiatra diagnosticou transtorno bipolar tipo 1 no paciente"
     (lista de existentes vazia)
@@ -1883,6 +1982,19 @@ def api_generate():
       {{"source": "Paciente", "target": "Depressao", "label": "possui"}}
     ]}}
 
+    Texto: "Cachorros e gatos são mamíferos" (lista de existentes vazia)
+    (Animal não está escrito, mas é o supertipo natural de Mamifero — traga-o e feche a cadeia)
+    {{"nodes_to_create": ["Animal", "Mamifero", "Cachorro", "Gato"], "connections": [
+      {{"source": "Mamifero", "target": "Animal", "label": null}},
+      {{"source": "Cachorro", "target": "Mamifero", "label": null}},
+      {{"source": "Gato", "target": "Mamifero", "label": null}}
+    ]}}
+
+    Texto: "O mamífero é um animal" (Animal e Mamifero já existem)
+    {{"nodes_to_create": [], "connections": [
+      {{"source": "Mamifero", "target": "Animal", "label": null}}
+    ]}}
+
     Agora extraia do TEXTO fornecido. Responda APENAS com JSON."""
         }
     ]
@@ -1891,7 +2003,8 @@ def api_generate():
         start = time.time()
         resp = http_requests.post(
             f"{_OLLAMA_HOST}/api/chat",
-            json={"model": "granite3.3:8b", "messages": messages, "stream": False, "format": EXTRACT_SCHEMA, "options": {"temperature": 0.3}},
+            json={"model": "granite3.3:8b", "messages": messages, "stream": False, "format": EXTRACT_SCHEMA,
+                  "options": {"temperature": 0.3}},
             timeout=450
         )
         resp.raise_for_status()
@@ -1908,6 +2021,9 @@ def api_generate():
 
         for node_name in extracted.get("nodes_to_create", []):
             node_name = _to_pascal(node_name)
+            if _is_invalid_name(node_name):
+                warnings.append(f"nó ignorado, nome inválido: {node_name!r}")
+                continue
             key = _normalize_key(node_name)
             if key in existing_name_set:
                 original = next((ex["name"] for ex in existing_nodes if _normalize_key(ex["name"]) == key), node_name)
@@ -1924,6 +2040,11 @@ def api_generate():
             source = _to_pascal(conn.get("source", ""))
             target = _to_pascal(conn.get("target", ""))
             label = _sanitize_label(conn.get("label"))
+
+            # descarta arestas onde o modelo alucinou 'null'/'none'/vazio como nó
+            if _is_invalid_name(source) or _is_invalid_name(target):
+                warnings.append(f"aresta ignorada, nó inválido: {source!r} → {target!r}")
+                continue
 
             # fallback: cria o nó se não existir em vez de ignorar a aresta
             src_id = name_to_id.get(_normalize_key(source))

@@ -42,6 +42,43 @@ const NODE_FONT_SIZE = "16px";    // tamanho da fonte dos labels dos nós
 const EDGE_FONT_SIZE = 12;        // tamanho da fonte dos labels das arestas (número pra calcular padding)
 const EDGE_LABEL_PADDING = 4;     // padding ao redor do texto do label
 
+// ============================================================
+// LABELS HIERÁRQUICOS (mesma convenção do subClassOf: source=filho, target=pai)
+// ============================================================
+
+// ⚠️ ATENÇÃO: a comparação aqui é FUZZY (normaliza case, acento e separadores).
+// Isso é proposital — o modelo / backend às vezes emite "subclassede", "Subclasse de"
+// ou "SUBCLASSE_DE" para a mesma relação. _normLabel() unifica todas.
+// Custo: dois labels que você considere DIFERENTES podem normalizar para a mesma
+// string e ambos virarem hierárquicos sem aviso. Ao adicionar labels novos à
+// ontologia, confira se nenhum normaliza igual a um destes (ver _normLabel).
+// O ideal é o backend emitir um vocabulário canônico; isto é a segunda linha de defesa.
+function _normLabel(s) {
+    return (s ?? "")
+        .toString()
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")  // remove acentos
+        .replace(/[()[\].,;:!?'"]/g, "")                    // remove pontuação (inclui parênteses)
+        .replace(/[\s_\-\/]+/g, "");                        // remove espaços/_/-//
+}
+
+const HIERARCHICAL_LABELS = new Set([
+    "subClassOf", "Sub class of", "Subclasse de", "É um(a)", "É um", "É uma",
+    "É tipo de", "É um tipo de", "É uma espécie de", "São", "Classifica-se como",
+    "Constitui um(a)", "Constitui um", "Constitui uma", "Especialização de",
+    "Subsunção", "Subsumido por", "Relação de inclusão", "Está contido em",
+    "É subconjunto de", "Implica em", "Caso particular de", "Herda de",
+    "Deriva de", "Descende de", "Filha de", "Extensão de", "Hipônimo de",
+    "Termo específico de", "Ramo de", "Categoria de", "Variante de"
+].map(_normLabel));
+
+function isHierarchical(label) {
+    return HIERARCHICAL_LABELS.has(_normLabel(label));
+}
+
+// Labels que devem ser escondidos do grafo (não-hierárquicos, mas estruturais)
+const HIDDEN_EDGE_LABELS = new Set(["domain", "range"]);
+
 // Canvas dimensions
 const width  = document.getElementById('graph-container').clientWidth;
 const height = document.getElementById('graph-container').clientHeight;
@@ -193,8 +230,10 @@ function redrawGraph() {
         .attr("stroke-width", d => d.__preview ? 2 : Math.sqrt(d.value || 1));
 
     // --- Labels das arestas (com fundo que "corta" a linha) ---
-    const STRUCTURAL = new Set(["subClassOf", "domain", "range"]);
-    const edgesWithLabels = edges.filter(d => !STRUCTURAL.has(d.label));
+    // Esconde labels hierárquicos (representados pela árvore) e estruturais (domain/range)
+    const edgesWithLabels = edges.filter(d =>
+        !isHierarchical(d.label) && !HIDDEN_EDGE_LABELS.has(d.label)
+    );
 
     // Backgrounds (retângulos que cobrem a linha)
     linkLabelBg = linkLabelBgG.selectAll("rect")
@@ -730,7 +769,7 @@ function buildTree(apiData) {
     const nodeMap = new Map();
     nodes.forEach(n => nodeMap.set(n.id, { id: n.id, name: n.name, children: [] }));
 
-    const subClassEdges = edges.filter(e => e.label === "subClassOf");
+    const subClassEdges = edges.filter(e => isHierarchical(e.label));
     subClassEdges.forEach(e => {
         const pai   = nodeMap.get(e.target);
         const filho = nodeMap.get(e.source);
@@ -770,7 +809,7 @@ function buildTreeFromLive() {
     }));
 
     const subClassEdges = edges.filter(e => {
-        if (e.label !== "subClassOf") return false;
+        if (!isHierarchical(e.label)) return false;
         if (e.__preview === "remove") return false;
         const srcId = e.source?.id ?? e.source;
         const tgtId = e.target?.id ?? e.target;
@@ -852,7 +891,7 @@ function updateTree() {
             const edge  = edges.find(e => {
                 const s = e.source?.id ?? e.source;
                 const t = e.target?.id ?? e.target;
-                return s === srcId && t === tgtId && e.label === "subClassOf";
+                return s === srcId && t === tgtId && isHierarchical(e.label);
             });
             if (edge?.__preview === "remove") return "#f85149";
             if (edge?.__preview === "add")    return "#3fb950";
@@ -864,7 +903,7 @@ function updateTree() {
             const edge  = edges.find(e => {
                 const s = e.source?.id ?? e.source;
                 const t = e.target?.id ?? e.target;
-                return s === srcId && t === tgtId && e.label === "subClassOf";
+                return s === srcId && t === tgtId && isHierarchical(e.label);
             });
             return edge?.__preview ? "4,4" : null;
         })
