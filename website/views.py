@@ -1884,7 +1884,15 @@ def api_generate():
         return jsonify({"ok": False, "error": "prompt vazio"}), 400
 
     existing_nodes = body.get("existing_nodes", [])
-    existing_names_list = [n["name"] for n in existing_nodes]
+
+
+    existing_desc = [
+        '{} [{}]'.format(
+            n["name"],
+            "Individuo" if n.get("type") == "Individual" else "Classe"
+        )
+        for n in existing_nodes
+    ]
 
     def _normalize_key(name: str) -> str:
         import unicodedata
@@ -1892,20 +1900,41 @@ def api_generate():
         ascii_str = nfkd.encode('ASCII', 'ignore').decode('ASCII')
         return ascii_str.lower().strip()
 
+
+    RELATION_LABEL = {
+        "hierarquia":   "subClassOf",
+        "equivalencia": "equivalentClass",
+        "instancia":    "type",
+    }
+
     EXTRACT_SCHEMA = {
         "type": "object",
         "properties": {
-            "nodes_to_create": {"type": "array", "items": {"type": "string"}},
+            "nodes_to_create": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "kind": {"type": "string", "enum": ["Classe", "Individuo"]}
+                    },
+                    "required": ["name", "kind"]
+                }
+            },
             "connections": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
+                        "relation_type": {
+                            "type": "string",
+                            "enum": ["hierarquia", "equivalencia", "instancia", "verbal"]
+                        },
                         "source": {"type": "string"},
                         "target": {"type": "string"},
                         "label": {"type": ["string", "null"]}
                     },
-                    "required": ["source", "target", "label"]
+                    "required": ["relation_type", "source", "target", "label"]
                 }
             }
         },
@@ -1917,85 +1946,90 @@ def api_generate():
             "role": "system",
             "content": (
                 "Você é um sistema de extração de conhecimento para ontologias OWL. "
-                "Sua tarefa é ler um texto em linguagem natural e identificar:\n"
-                "1. Entidades (classes OWL) mencionadas ou implícitas no texto.\n"
-                "2. Relações semânticas entre essas entidades.\n"
-                "Extraia apenas entidades e relações que fazem sentido como classes de domínio. "
-                "Ignore artigos, verbos auxiliares e conectivos. "
+                "Lê texto em linguagem natural e extrai entidades e relações.\n"
+                "Extraia APENAS o que está escrito no texto. Não infira conceitos "
+                "que não foram mencionados. Não crie relações que o texto não afirma.\n"
                 "Responda APENAS com JSON válido, sem markdown."
             )
         },
         {
             "role": "user",
-            "content": f"""Leia o texto abaixo e extraia entidades e relações para um grafo ontológico.
+            "content": f"""Extraia entidades e relações do TEXTO para um grafo ontológico.
 
-    TEXTO:
-    "{prompt}"
+TEXTO:
+"{prompt}"
 
-    Nós que já existem no grafo (APENAS estes podem aparecer em connections sem estar em nodes_to_create):
-    {json.dumps(existing_names_list, ensure_ascii=False)}
-    Se a lista estiver vazia, TODOS os nós referenciados em connections DEVEM estar em nodes_to_create.
+ENTIDADES QUE JÁ EXISTEM NO GRAFO (com seu tipo):
+{json.dumps(existing_desc, ensure_ascii=False)}
+Toda entidade citada em connections que NÃO estiver nesta lista DEVE aparecer em nodes_to_create.
 
-    Responda com JSON exatamente neste formato:
-    {{
-      "nodes_to_create": ["EntidadeNova1", "EntidadeNova2"],
-      "connections": [
-        {{"source": "EntidadeOrigem", "target": "EntidadeDestino", "label": "nomeRelacao ou null"}}
-      ]
-    }}
+TIPO DE ENTIDADE (campo "kind"):
+- "Individuo": uma coisa específica e única — nome próprio de pessoa, lugar
+  determinado, item identificável. Ex.: Joao, Maria, HospitalSantaCasa.
+- "Classe": uma categoria, um conceito, um tipo de coisa.
+  Ex.: Pessoa, Terapeuta, Medicamento.
+- Na dúvida, use "Classe".
 
-    REGRAS DE EXTRAÇÃO:
-    - Identifique substantivos que representam conceitos do domínio, incluindo os que aparecem em orações subordinadas como "para tratar X", "causando Y", "devido a Z"
-    - Para cada relação no texto (verbos como "detectou", "possui", "causa", "trata"), crie uma conexão com label = verbo em camelCase
-    - Se a relação não estiver explícita no texto, use null (vira subClassOf)
-    - Normalize nomes para PascalCase sem acentos e SEM espaços, tudo junto: "TranstornoBipolarTipo1" e não "Transtorno Bipolar" separado de "Tipo1"
-    - Não crie entidades para palavras funcionais (artigos, preposições, pronomes)
-    - REGRA CRÍTICA: toda entidade que aparecer em connections.source ou connections.target DEVE estar em nodes_to_create, exceto as que já existem na lista acima
-    - NUNCA assuma que um nó existe se ele não estiver na lista acima
+TIPO DE RELAÇÃO (campo "relation_type") — escolha UM dos quatro:
 
-    REGRA DE HIERARQUIA (INFERÊNCIA):
-    - Quando dois conceitos têm relação gênero-espécie evidente (um é um tipo/espécie/subclasse do outro), crie uma conexão hierárquica com label=null, MESMO que o verbo não apareça explicitamente no texto.
-    - Em conexões hierárquicas, source é sempre o conceito MAIS ESPECÍFICO (filho) e target o MAIS GERAL (pai). Ex.: source=Cachorro, target=Mamifero.
-    - Se um conceito específico tem um superconceito mais geral evidente, NÃO o deixe órfão: conecte-o ao pai. Quando fizer sentido, traga também o supertipo mais geral mesmo que não esteja escrito (ex.: havendo "Mamifero", o pai natural "Animal" pode ser criado e conectado).
-    - Feche a cadeia completa: se A é tipo de B e B é tipo de C, gere AS DUAS arestas (A->B e B->C), não apenas a folha.
-    - ATENÇÃO: "null" só pode aparecer no campo "label" (relação implícita). NUNCA use a palavra "null" como source ou target. Quando o texto disser "X é um Y" (ex.: "Cardiologista é um médico"), crie o nó Y (ex.: "Medico") e a aresta X->Y com label=null. O target deve ser sempre um conceito real, nunca null.
+  "hierarquia"    X é um tipo/espécie/subclasse de Y, e AMBOS são Classe.
+                  direção: source = o MAIS ESPECÍFICO, target = o MAIS GERAL
+                  label: null
 
-    EXEMPLOS:
-    Texto: "O psiquiatra diagnosticou transtorno bipolar tipo 1 no paciente"
-    (lista de existentes vazia)
-    {{"nodes_to_create": ["Psiquiatra", "Paciente", "TranstornoBipolarTipo1"], "connections": [
-      {{"source": "Psiquiatra", "target": "TranstornoBipolarTipo1", "label": "diagnosticou"}},
-      {{"source": "Paciente", "target": "TranstornoBipolarTipo1", "label": "possui"}}
-    ]}}
+  "instancia"     X é uma ocorrência concreta de Y — X é Individuo, Y é Classe.
+                  direção: source = o INDIVÍDUO, target = a CLASSE
+                  label: null
 
-    Texto: "O médico prescreveu antibiótico para o paciente com infecção" (Paciente já existe)
-    {{"nodes_to_create": ["Medico", "Antibiotico", "Infeccao"], "connections": [
-      {{"source": "Medico", "target": "Antibiotico", "label": "prescreveu"}},
-      {{"source": "Paciente", "target": "Infeccao", "label": "possui"}},
-      {{"source": "Antibiotico", "target": "Infeccao", "label": "trata"}}
-    ]}}
+  "equivalencia"  X e Y designam exatamente a mesma coisa ("é equivalente a",
+                  "é o mesmo que", "também chamado de").
+                  direção: indiferente
+                  label: null
 
-    Texto: "O médico receitou fluoxetina para tratar a depressão do paciente" (Medico e Paciente já existem)
-    {{"nodes_to_create": ["Fluoxetina", "Depressao"], "connections": [
-      {{"source": "Medico", "target": "Fluoxetina", "label": "receitou"}},
-      {{"source": "Fluoxetina", "target": "Depressao", "label": "trata"}},
-      {{"source": "Paciente", "target": "Depressao", "label": "possui"}}
-    ]}}
+  "verbal"        qualquer outra relação, expressa por um verbo do texto.
+                  direção: source = SUJEITO da oração, target = OBJETO
+                  label: o verbo em camelCase
 
-    Texto: "Cachorros e gatos são mamíferos" (lista de existentes vazia)
-    (Animal não está escrito, mas é o supertipo natural de Mamifero — traga-o e feche a cadeia)
-    {{"nodes_to_create": ["Animal", "Mamifero", "Cachorro", "Gato"], "connections": [
-      {{"source": "Mamifero", "target": "Animal", "label": null}},
-      {{"source": "Cachorro", "target": "Mamifero", "label": null}},
-      {{"source": "Gato", "target": "Mamifero", "label": null}}
-    ]}}
+REGRA DE DIREÇÃO (a mais importante):
+Em "A é uma B", o sujeito A é sempre o source e B é o target — não inverta.
+Isso vale para hierarquia, instancia e verbal, sem exceção.
 
-    Texto: "O mamífero é um animal" (Animal e Mamifero já existem)
-    {{"nodes_to_create": [], "connections": [
-      {{"source": "Mamifero", "target": "Animal", "label": null}}
-    ]}}
+REGRAS DE EXTRAÇÃO:
+- Nomes em PascalCase, sem acento e sem espaço: "TranstornoBipolarTipo1".
+- Não crie entidades para artigos, preposições ou pronomes.
+- NÃO invente conceitos que não estão no texto. Se o texto fala de Mamifero
+  e não menciona Animal, NÃO crie Animal.
+- NÃO crie relações que o texto não afirma explicitamente.
+- Não use a palavra "null" como source ou target.
 
-    Agora extraia do TEXTO fornecido. Responda APENAS com JSON."""
+EXEMPLOS (um por tipo de relação):
+
+Texto: "Cardiologista é um tipo de médico"  (nada existe ainda)
+{{"nodes_to_create": [{{"name":"Cardiologista","kind":"Classe"}},
+                     {{"name":"Medico","kind":"Classe"}}],
+  "connections": [
+   {{"relation_type":"hierarquia","source":"Cardiologista","target":"Medico","label":null}}]}}
+
+Texto: "Joao é um paciente"  (Paciente [Classe] já existe)
+{{"nodes_to_create": [{{"name":"Joao","kind":"Individuo"}}],
+  "connections": [
+   {{"relation_type":"instancia","source":"Joao","target":"Paciente","label":null}}]}}
+
+Texto: "Paciente é o mesmo que Cliente"  (Paciente [Classe] já existe)
+{{"nodes_to_create": [{{"name":"Cliente","kind":"Classe"}}],
+  "connections": [
+   {{"relation_type":"equivalencia","source":"Paciente","target":"Cliente","label":null}}]}}
+
+Texto: "O médico prescreveu antibiótico"  (Medico [Classe] já existe)
+{{"nodes_to_create": [{{"name":"Antibiotico","kind":"Classe"}}],
+  "connections": [
+   {{"relation_type":"verbal","source":"Medico","target":"Antibiotico","label":"prescreveu"}}]}}
+
+Texto: "Maria atende Joao"  (Maria [Individuo] e Joao [Individuo] já existem)
+{{"nodes_to_create": [],
+  "connections": [
+   {{"relation_type":"verbal","source":"Maria","target":"Joao","label":"atende"}}]}}
+
+Agora extraia do TEXTO. Responda APENAS com JSON."""
         }
     ]
 
@@ -2003,8 +2037,13 @@ def api_generate():
         start = time.time()
         resp = http_requests.post(
             f"{_OLLAMA_HOST}/api/chat",
-            json={"model": "granite3.3:8b", "messages": messages, "stream": False, "format": EXTRACT_SCHEMA,
-                  "options": {"temperature": 0.3}},
+            json={
+                "model": "granite3.3:8b",
+                "messages": messages,
+                "stream": False,
+                "format": EXTRACT_SCHEMA,
+                "options": {"temperature": 0.3, "num_ctx": 8192},
+            },
             timeout=450
         )
         resp.raise_for_status()
@@ -2018,42 +2057,67 @@ def api_generate():
         name_to_id = {_normalize_key(n["name"]): n["name"] for n in existing_nodes}
         nodes = []
         warnings = []
+        fallback_count = 0   # métrica: quantas vezes o modelo violou a regra crítica
 
-        for node_name in extracted.get("nodes_to_create", []):
+        # --- nós ---------------------------------------------------------
+        for item in extracted.get("nodes_to_create", []):
+            # tolera o formato antigo (string pura) caso o modelo escorregue
+            if isinstance(item, str):
+                node_name, kind = item, "Classe"
+            else:
+                node_name = item.get("name", "")
+                kind = item.get("kind", "Classe")
+
             node_name = _to_pascal(node_name)
             if _is_invalid_name(node_name):
                 warnings.append(f"nó ignorado, nome inválido: {node_name!r}")
                 continue
+
             key = _normalize_key(node_name)
             if key in existing_name_set:
-                original = next((ex["name"] for ex in existing_nodes if _normalize_key(ex["name"]) == key), node_name)
+                original = next(
+                    (ex["name"] for ex in existing_nodes if _normalize_key(ex["name"]) == key),
+                    node_name
+                )
                 name_to_id[key] = original
                 continue
+
             nid = str(uuid.uuid4())
             name_to_id[key] = nid
-            nodes.append({"id": nid, "name": node_name, "type": "Class"})
+            nodes.append({
+                "id": nid,
+                "name": node_name,
+                "type": "Individual" if kind == "Individuo" else "Class",
+            })
 
         print(f"[generate] name_to_id: {name_to_id}")
 
+        # --- arestas -----------------------------------------------------
         edges = []
         for conn in extracted.get("connections", []):
+            rel = conn.get("relation_type", "verbal")
             source = _to_pascal(conn.get("source", ""))
             target = _to_pascal(conn.get("target", ""))
-            label = _sanitize_label(conn.get("label"))
 
-            # descarta arestas onde o modelo alucinou 'null'/'none'/vazio como nó
+            # O label canônico vem do relation_type, não do texto do modelo.
+            # É isto que mata "é", "tipo_de" e "equivalente" na origem.
+            if rel in RELATION_LABEL:
+                label = RELATION_LABEL[rel]
+            else:
+                label = _sanitize_label(conn.get("label")) or "relacionadoCom"
+
             if _is_invalid_name(source) or _is_invalid_name(target):
                 warnings.append(f"aresta ignorada, nó inválido: {source!r} → {target!r}")
                 continue
 
-            # fallback: cria o nó se não existir em vez de ignorar a aresta
             src_id = name_to_id.get(_normalize_key(source))
             if not src_id and source:
                 nid = str(uuid.uuid4())
                 name_to_id[_normalize_key(source)] = nid
                 nodes.append({"id": nid, "name": source, "type": "Class"})
                 src_id = nid
-                warnings.append(f"nó origem '{source}' criado automaticamente via fallback")
+                fallback_count += 1
+                warnings.append(f"FALLBACK: nó origem '{source}' não estava em nodes_to_create")
 
             tgt_id = name_to_id.get(_normalize_key(target))
             if not tgt_id and target:
@@ -2061,7 +2125,8 @@ def api_generate():
                 name_to_id[_normalize_key(target)] = nid
                 nodes.append({"id": nid, "name": target, "type": "Class"})
                 tgt_id = nid
-                warnings.append(f"nó destino '{target}' criado automaticamente via fallback")
+                fallback_count += 1
+                warnings.append(f"FALLBACK: nó destino '{target}' não estava em nodes_to_create")
 
             if not src_id or not tgt_id:
                 warnings.append(f"aresta ignorada: '{source}' → '{target}' inválida")
@@ -2069,7 +2134,16 @@ def api_generate():
 
             edges.append({"source": src_id, "target": tgt_id, "label": label})
 
-        return jsonify({"ok": True, "data": {"nodes": nodes, "edges": edges}, "warnings": warnings})
+        if fallback_count:
+            print(f"[generate] ATENÇÃO: {fallback_count} nó(s) criado(s) via fallback "
+                  f"— o modelo violou a regra de nodes_to_create")
+
+        return jsonify({
+            "ok": True,
+            "data": {"nodes": nodes, "edges": edges},
+            "warnings": warnings,
+            "fallback_count": fallback_count,
+        })
 
     except Exception as e:
         import traceback
