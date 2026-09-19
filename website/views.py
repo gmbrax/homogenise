@@ -34,8 +34,12 @@ from langchain import hub
 from website.features.synopsis.synopsis_repository import SynopsisRepository
 from website.features.synopsis.triple_conversion import TripleConversion
 
+import threading
+import unicodedata
+
 views = Blueprint('views', __name__)
 
+from sentence_transformers import SentenceTransformer, util
 
 @views.route('/')
 @login_required
@@ -1872,6 +1876,141 @@ def _sanitize_label(label: str) -> str:
 
 # ── /api/generate ─────────────────────────────────────────────────────────
 
+
+_EMB_MODEL_NAME = 'paraphrase-multilingual-MiniLM-L12-v2'
+
+_emb_lock = threading.Lock()
+_emb_model = None
+_ancoras_cache = {}
+
+
+def _carregar_ancoras(ancoras):
+    """
+    Devolve o banco encodado para o dict de âncoras dado.
+
+    Reconstruir o dict a cada requisição custa microssegundos; reencodar as
+    frases custaria ~100 ms e carregar o modelo, segundos. Por isso o cache é
+    da matriz de embeddings, não do dict — e é chaveado pelo conteúdo, de modo
+    que editar as âncoras invalida o cache sozinho.
+    """
+    global _emb_model
+
+    labels, frases = [], []
+    for lbl, exemplos in ancoras.items():
+        for f in exemplos:
+            labels.append(lbl)
+            frases.append(f)
+    assinatura = tuple(zip(labels, frases))
+
+    banco = _ancoras_cache.get(assinatura)
+    if banco is not None:
+        return banco
+
+    with _emb_lock:
+        banco = _ancoras_cache.get(assinatura)
+        if banco is not None:
+            return banco
+        if _emb_model is None:
+            _emb_model = SentenceTransformer(_EMB_MODEL_NAME)
+        banco = {
+            "model": _emb_model,
+            "labels": labels,
+            "frases": frases,
+            "emb": _emb_model.encode(frases, convert_to_tensor=True,
+                                     normalize_embeddings=True),
+        }
+        _ancoras_cache[assinatura] = banco
+        return banco
+
+
+# ── mecânica ──────────────────────────────────────────────────────────────
+
+def _norm_key(name: str) -> str:
+    nfkd = unicodedata.normalize('NFKD', name)
+    return nfkd.encode('ASCII', 'ignore').decode('ASCII').lower().strip()
+
+
+def _sem_acento(txt: str) -> str:
+    nfkd = unicodedata.normalize('NFKD', txt)
+    return nfkd.encode('ASCII', 'ignore').decode('ASCII')
+
+
+def _to_camel(rel: str) -> str:
+    palavras = [p for p in re.split(r'\W+', _sem_acento(rel)) if p]
+    if not palavras:
+        return ""
+    return palavras[0].lower() + "".join(p.capitalize() for p in palavras[1:])
+
+
+def _classificar_conectivo(rel, banco, score_min):
+    """Devolve (label, score, ancora). label None = verbal."""
+    vec = banco["model"].encode(rel, convert_to_tensor=True,
+                                normalize_embeddings=True)
+    sims = util.cos_sim(vec, banco["emb"])[0]
+    best = int(sims.argmax())
+    lbl = banco["labels"][best]
+    score = float(sims[best])
+    if lbl == "_verbal" or score < score_min:
+        return None, score, banco["frases"][best]
+    return lbl, score, banco["frases"][best]
+
+
+def _split_linha(linha: str):
+    """(sujeito, conectivo, objeto) ou None."""
+    if linha.count("|") == 2:
+        s, rel, t = [p.strip() for p in linha.split("|")]
+        return (s, rel, t) if (s and rel and t) else None
+    parts = linha.split()
+    if len(parts) < 3:
+        return None
+    return parts[0], " ".join(parts[1:-1]), parts[-1]
+
+
+def _resolver_tipos(reg, arestas,
+                    forcar_individual=frozenset(), forcar_classe=frozenset()):
+    """
+    Passada 2. Um nó só é Individuo se:
+      - é origem de um 'isa' (cópula nua), E
+      - nunca é alvo de isa/subClassOf, E
+      - nunca é origem de subClassOf explícito, E
+      - não aparece em equivalentClass.
+    Qualquer outro caso vira Classe — na dúvida, Classe.
+    Nós que já existem no grafo mantêm o tipo que vieram.
+    """
+    generalizados = {e["tgt"]["ref"] for e in arestas
+                     if e["label"] in ("isa", "subClassOf")}
+    especializados = {e["src"]["ref"] for e in arestas
+                      if e["label"] == "subClassOf"}
+    instanciadores = {e["src"]["ref"] for e in arestas if e["label"] == "isa"}
+    equivalentes = set()
+    for e in arestas:
+        if e["label"] == "equivalentClass":
+            equivalentes.add(e["src"]["ref"])
+            equivalentes.add(e["tgt"]["ref"])
+
+    for key, n in reg.items():
+        if n["type"]:  # veio do grafo, é autoridade
+            continue
+        if key in forcar_individual:
+            n["type"] = "Individual"
+            continue
+        if key in forcar_classe:
+            n["type"] = "Class"
+            continue
+        ref = n["ref"]
+        e_individuo = (
+                ref in instanciadores
+                and ref not in generalizados
+                and ref not in especializados
+                and ref not in equivalentes
+        )
+        n["type"] = "Individual" if e_individuo else "Class"
+
+    for e in arestas:  # isa indefinido → subClassOf ou type
+        if e["label"] == "isa":
+            e["label"] = "subClassOf" if e["src"]["type"] == "Class" else "type"
+
+
 @views.route('/api/generate', methods=['POST'])
 @login_required
 def api_generate():
@@ -1885,264 +2024,128 @@ def api_generate():
 
     existing_nodes = body.get("existing_nodes", [])
 
+    # ── ajustes ───────────────────────────────────────────────────────────
 
-    existing_desc = [
-        '{} [{}]'.format(
-            n["name"],
-            "Individuo" if n.get("type") == "Individual" else "Classe"
-        )
-        for n in existing_nodes
-    ]
-
-    def _normalize_key(name: str) -> str:
-        import unicodedata
-        nfkd = unicodedata.normalize('NFKD', name)
-        ascii_str = nfkd.encode('ASCII', 'ignore').decode('ASCII')
-        return ascii_str.lower().strip()
-
-
-    RELATION_LABEL = {
-        "hierarquia":   "subClassOf",
-        "equivalencia": "equivalentClass",
-        "instancia":    "type",
+    ANCORAS = {
+        # subclasse explícita: não há dúvida, os dois lados são Classe
+        "subClassOf": [
+            "é um tipo de", "é uma espécie de", "é subclasse de",
+            "é um subtipo de", "é uma categoria de", "é uma variedade de",
+        ],
+        # cópula nua: ambígua entre subclasse e instância, resolve na passada 2
+        "isa": [
+            "é um", "é uma", "é", "são",
+        ],
+        "equivalentClass": [
+            "é equivalente a", "é o mesmo que", "é idêntico a",
+            "coincide com", "também chamado de", "também conhecido como",
+        ],
+        # verbal é o default; estas âncoras só afastam do estrutural
+        "_verbal": [
+            "atende", "prescreve", "trata", "possui", "contém",
+            "realiza", "utiliza", "produz", "causa", "administra", "recebe",
+        ],
     }
 
-    EXTRACT_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "nodes_to_create": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "kind": {"type": "string", "enum": ["Classe", "Individuo"]}
-                    },
-                    "required": ["name", "kind"]
-                }
-            },
-            "connections": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "relation_type": {
-                            "type": "string",
-                            "enum": ["hierarquia", "equivalencia", "instancia", "verbal"]
-                        },
-                        "source": {"type": "string"},
-                        "target": {"type": "string"},
-                        "label": {"type": ["string", "null"]}
-                    },
-                    "required": ["relation_type", "source", "target", "label"]
-                }
-            }
-        },
-        "required": ["nodes_to_create", "connections"]
-    }
+    # Abaixo disto nenhuma âncora estrutural vale e a relação cai em verbal.
+    # Use o campo "debug" da resposta para calibrar com o seu corpus.
+    SCORE_MIN = 0.55
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Você é um sistema de extração de conhecimento para ontologias OWL. "
-                "Lê texto em linguagem natural e extrai entidades e relações.\n"
-                "Extraia APENAS o que está escrito no texto. Não infira conceitos "
-                "que não foram mencionados. Não crie relações que o texto não afirma.\n"
-                "Responda APENAS com JSON válido, sem markdown."
-            )
-        },
-        {
-            "role": "user",
-            "content": f"""Extraia entidades e relações do TEXTO para um grafo ontológico.
+    # Override manual por norm_key, vence a dedução da passada 2.
+    FORCAR_INDIVIDUAL = frozenset()
+    FORCAR_CLASSE = frozenset()
 
-TEXTO:
-"{prompt}"
+    # ── registro por requisição ───────────────────────────────────────────
 
-ENTIDADES QUE JÁ EXISTEM NO GRAFO (com seu tipo):
-{json.dumps(existing_desc, ensure_ascii=False)}
-Toda entidade citada em connections que NÃO estiver nesta lista DEVE aparecer em nodes_to_create.
-
-TIPO DE ENTIDADE (campo "kind"):
-- "Individuo": uma coisa específica e única — nome próprio de pessoa, lugar
-  determinado, item identificável. Ex.: Joao, Maria, HospitalSantaCasa.
-- "Classe": uma categoria, um conceito, um tipo de coisa.
-  Ex.: Pessoa, Terapeuta, Medicamento.
-- Na dúvida, use "Classe".
-
-TIPO DE RELAÇÃO (campo "relation_type") — escolha UM dos quatro:
-
-  "hierarquia"    X é um tipo/espécie/subclasse de Y, e AMBOS são Classe.
-                  direção: source = o MAIS ESPECÍFICO, target = o MAIS GERAL
-                  label: null
-
-  "instancia"     X é uma ocorrência concreta de Y — X é Individuo, Y é Classe.
-                  direção: source = o INDIVÍDUO, target = a CLASSE
-                  label: null
-
-  "equivalencia"  X e Y designam exatamente a mesma coisa ("é equivalente a",
-                  "é o mesmo que", "também chamado de").
-                  direção: indiferente
-                  label: null
-
-  "verbal"        qualquer outra relação, expressa por um verbo do texto.
-                  direção: source = SUJEITO da oração, target = OBJETO
-                  label: o verbo em camelCase
-
-REGRA DE DIREÇÃO (a mais importante):
-Em "A é uma B", o sujeito A é sempre o source e B é o target — não inverta.
-Isso vale para hierarquia, instancia e verbal, sem exceção.
-
-REGRAS DE EXTRAÇÃO:
-- Nomes em PascalCase, sem acento e sem espaço: "TranstornoBipolarTipo1".
-- Não crie entidades para artigos, preposições ou pronomes.
-- NÃO invente conceitos que não estão no texto. Se o texto fala de Mamifero
-  e não menciona Animal, NÃO crie Animal.
-- NÃO crie relações que o texto não afirma explicitamente.
-- Não use a palavra "null" como source ou target.
-
-EXEMPLOS (um por tipo de relação):
-
-Texto: "Cardiologista é um tipo de médico"  (nada existe ainda)
-{{"nodes_to_create": [{{"name":"Cardiologista","kind":"Classe"}},
-                     {{"name":"Medico","kind":"Classe"}}],
-  "connections": [
-   {{"relation_type":"hierarquia","source":"Cardiologista","target":"Medico","label":null}}]}}
-
-Texto: "Joao é um paciente"  (Paciente [Classe] já existe)
-{{"nodes_to_create": [{{"name":"Joao","kind":"Individuo"}}],
-  "connections": [
-   {{"relation_type":"instancia","source":"Joao","target":"Paciente","label":null}}]}}
-
-Texto: "Paciente é o mesmo que Cliente"  (Paciente [Classe] já existe)
-{{"nodes_to_create": [{{"name":"Cliente","kind":"Classe"}}],
-  "connections": [
-   {{"relation_type":"equivalencia","source":"Paciente","target":"Cliente","label":null}}]}}
-
-Texto: "O médico prescreveu antibiótico"  (Medico [Classe] já existe)
-{{"nodes_to_create": [{{"name":"Antibiotico","kind":"Classe"}}],
-  "connections": [
-   {{"relation_type":"verbal","source":"Medico","target":"Antibiotico","label":"prescreveu"}}]}}
-
-Texto: "Maria atende Joao"  (Maria [Individuo] e Joao [Individuo] já existem)
-{{"nodes_to_create": [],
-  "connections": [
-   {{"relation_type":"verbal","source":"Maria","target":"Joao","label":"atende"}}]}}
-
-Agora extraia do TEXTO. Responda APENAS com JSON."""
+    # Nada de dict global: em Flask isso vazaria entre usuários e entre
+    # chamadas.
+    reg = {}
+    for n in existing_nodes:
+        reg[_norm_key(n["name"])] = {
+            "ref": n["name"],  # nó existente é referenciado pelo nome
+            "name": n["name"],
+            "type": n.get("type"),
+            "novo": False,
         }
-    ]
+
+    def get_or_create(nome):
+        k = _norm_key(nome)
+        if k not in reg:
+            reg[k] = {"ref": str(uuid.uuid4()), "name": nome,
+                      "type": None, "novo": True}
+        return reg[k]
 
     try:
         start = time.time()
-        resp = http_requests.post(
-            f"{_OLLAMA_HOST}/api/chat",
-            json={
-                "model": "granite3.3:8b",
-                "messages": messages,
-                "stream": False,
-                "format": EXTRACT_SCHEMA,
-                "options": {"temperature": 0.3, "num_ctx": 8192},
-            },
-            timeout=450
-        )
-        resp.raise_for_status()
-        elapsed = time.time() - start
-        print(f"[generate] modelo respondeu em {elapsed:.1f}s")
+        banco = _carregar_ancoras(ANCORAS)
 
-        extracted = json.loads(resp.json()["message"]["content"].strip())
-        print(f"[generate] extração: {json.dumps(extracted, ensure_ascii=False)}")
-
-        existing_name_set = {_normalize_key(n["name"]) for n in existing_nodes}
-        name_to_id = {_normalize_key(n["name"]): n["name"] for n in existing_nodes}
-        nodes = []
+        arestas = []
         warnings = []
-        fallback_count = 0   # métrica: quantas vezes o modelo violou a regra crítica
+        debug = []
 
-        # --- nós ---------------------------------------------------------
-        for item in extracted.get("nodes_to_create", []):
-            # tolera o formato antigo (string pura) caso o modelo escorregue
-            if isinstance(item, str):
-                node_name, kind = item, "Classe"
-            else:
-                node_name = item.get("name", "")
-                kind = item.get("kind", "Classe")
-
-            node_name = _to_pascal(node_name)
-            if _is_invalid_name(node_name):
-                warnings.append(f"nó ignorado, nome inválido: {node_name!r}")
+        linhas = [l.strip().rstrip('.') for l in re.split(r'[\n;]+', prompt)]
+        for linha in linhas:
+            if not linha:
                 continue
 
-            key = _normalize_key(node_name)
-            if key in existing_name_set:
-                original = next(
-                    (ex["name"] for ex in existing_nodes if _normalize_key(ex["name"]) == key),
-                    node_name
-                )
-                name_to_id[key] = original
+            corte = _split_linha(linha)
+            if not corte:
+                warnings.append(f"linha ignorada, formato inesperado: {linha!r}")
+                continue
+            s_txt, rel_txt, t_txt = corte
+
+            s_nome = _to_pascal(s_txt)
+            t_nome = _to_pascal(t_txt)
+            if _is_invalid_name(s_nome) or _is_invalid_name(t_nome):
+                warnings.append(f"linha ignorada, nome inválido: "
+                                f"{s_nome!r} → {t_nome!r}")
                 continue
 
-            nid = str(uuid.uuid4())
-            name_to_id[key] = nid
-            nodes.append({
-                "id": nid,
-                "name": node_name,
-                "type": "Individual" if kind == "Individuo" else "Class",
+            label, score, ancora = _classificar_conectivo(rel_txt, banco,
+                                                          SCORE_MIN)
+            if label is None:
+                label = _sanitize_label(_to_camel(rel_txt)) or "relacionadoCom"
+
+            src = get_or_create(s_nome)
+            tgt = get_or_create(t_nome)
+            if src is tgt:
+                warnings.append(f"aresta ignorada, laço em {s_nome!r}")
+                continue
+
+            arestas.append({"src": src, "tgt": tgt, "label": label})
+            debug.append({
+                "linha": linha,
+                "conectivo": rel_txt,
+                "label": label,
+                "score": round(score, 3),
+                "ancora": ancora,
             })
 
-        print(f"[generate] name_to_id: {name_to_id}")
+        _resolver_tipos(reg, arestas, FORCAR_INDIVIDUAL, FORCAR_CLASSE)
 
-        # --- arestas -----------------------------------------------------
+        nodes = [{"id": n["ref"], "name": n["name"], "type": n["type"]}
+                 for n in reg.values() if n["novo"]]
+
+        vistas = set()
         edges = []
-        for conn in extracted.get("connections", []):
-            rel = conn.get("relation_type", "verbal")
-            source = _to_pascal(conn.get("source", ""))
-            target = _to_pascal(conn.get("target", ""))
-
-            # O label canônico vem do relation_type, não do texto do modelo.
-            # É isto que mata "é", "tipo_de" e "equivalente" na origem.
-            if rel in RELATION_LABEL:
-                label = RELATION_LABEL[rel]
-            else:
-                label = _sanitize_label(conn.get("label")) or "relacionadoCom"
-
-            if _is_invalid_name(source) or _is_invalid_name(target):
-                warnings.append(f"aresta ignorada, nó inválido: {source!r} → {target!r}")
+        for e in arestas:
+            chave = (e["src"]["ref"], e["tgt"]["ref"], e["label"])
+            if chave in vistas:
                 continue
+            vistas.add(chave)
+            edges.append({"source": e["src"]["ref"],
+                          "target": e["tgt"]["ref"],
+                          "label": e["label"]})
 
-            src_id = name_to_id.get(_normalize_key(source))
-            if not src_id and source:
-                nid = str(uuid.uuid4())
-                name_to_id[_normalize_key(source)] = nid
-                nodes.append({"id": nid, "name": source, "type": "Class"})
-                src_id = nid
-                fallback_count += 1
-                warnings.append(f"FALLBACK: nó origem '{source}' não estava em nodes_to_create")
-
-            tgt_id = name_to_id.get(_normalize_key(target))
-            if not tgt_id and target:
-                nid = str(uuid.uuid4())
-                name_to_id[_normalize_key(target)] = nid
-                nodes.append({"id": nid, "name": target, "type": "Class"})
-                tgt_id = nid
-                fallback_count += 1
-                warnings.append(f"FALLBACK: nó destino '{target}' não estava em nodes_to_create")
-
-            if not src_id or not tgt_id:
-                warnings.append(f"aresta ignorada: '{source}' → '{target}' inválida")
-                continue
-
-            edges.append({"source": src_id, "target": tgt_id, "label": label})
-
-        if fallback_count:
-            print(f"[generate] ATENÇÃO: {fallback_count} nó(s) criado(s) via fallback "
-                  f"— o modelo violou a regra de nodes_to_create")
+        elapsed = time.time() - start
+        print(f"[generate] {len(edges)} aresta(s) em {elapsed:.2f}s")
 
         return jsonify({
             "ok": True,
             "data": {"nodes": nodes, "edges": edges},
             "warnings": warnings,
-            "fallback_count": fallback_count,
+            "fallback_count": 0,  # mantido só para não quebrar o front
+            "debug": debug,
         })
 
     except Exception as e:
